@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <LangVersion>latest</LangVersion>
     <AssemblyName>WSGM.Device.Msi.Claw8A2Vm</AssemblyName>
     <RootNamespace>WSGM.Device.Msi.Claw8A2Vm</RootNamespace>
@@ -11,5 +11,18 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\WSGM.Device.Sdk\WSGM.Device.Sdk.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="10.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="WSGM.Device.Msi.Claw8A2Vm.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="plugin.wsgm.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="evidence.lock.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="PROVENANCE.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="THIRD_PARTY_NOTICES.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\LICENSE" Link="LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
