@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>WSGM.Device.Msi.Claw8A2Vm</AssemblyName>
+    <RootNamespace>WSGM.Device.Msi.Claw8A2Vm</RootNamespace>
+    <!-- Loaded by WSGM.DeviceHost at runtime from its package directory, never
+         referenced by WSGM. Nothing in the solution may add a ProjectReference to
+         this file; the dependency-direction test in tests/WSGM.Tests enforces it. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\WSGM.Device.Sdk\WSGM.Device.Sdk.csproj" />
+  </ItemGroup>
+</Project>
