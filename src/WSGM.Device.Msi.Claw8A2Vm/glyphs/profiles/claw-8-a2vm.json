@@ -1,0 +1,303 @@
+{
+  "schemaVersion": 1,
+  "profileId": "claw-8-a2vm",
+  "displayName": "MSI Claw 8 AI+ A2VM",
+  "revision": 1,
+  "exactDeviceIds": ["ms-1t52"],
+  "sourceRevision": "handheld-controller-glyphs-46792aadf3b1",
+  "noticePath": "THIRD_PARTY_NOTICES.md",
+  "assets": [
+    {
+      "sha256": "0e60bdd5b4b29701e00d692a2d76edefa5d286ff29ad8db30a6d537fe129516f",
+      "format": "Svg",
+      "byteCount": 469,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "195063664427c6562a4c5e62eaa3755e5a675bb3e6a9245ab12bae83b4aa2e41",
+      "format": "Svg",
+      "byteCount": 1027,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "1048f2b14b2a2f65631912f7050b3a4ca89631c3b887efe2ba473b250383bb89",
+      "format": "Svg",
+      "byteCount": 478,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "9fbf9c5c462a04b35fe7caa071173ea2910c20cededa64d30ebb07a734ef30b5",
+      "format": "Svg",
+      "byteCount": 431,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "a9ff4d709b1793cd6a21db4a939656ea5b9bb8a1a021a2e72584d152d2190083",
+      "format": "Svg",
+      "byteCount": 391,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "1248e2ceef068f49ebebfc4a628d227aa0e12e6e359a2888f41bd3476edf18ee",
+      "format": "Svg",
+      "byteCount": 393,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "d143165e53de95aff1aba2d2e88b0cc269cfa7eb691e9cbcf94785bf0cf9df4f",
+      "format": "Svg",
+      "byteCount": 389,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "ab1bcf0a20f0daf1e6c6f6cda296b4cfb7ebc31a440c4668bc14b5a31ec6111e",
+      "format": "Svg",
+      "byteCount": 391,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "8d33976e369ddbb99dbe620b5c0dae284188a65d93355b4919629a457d8abe6f",
+      "format": "Svg",
+      "byteCount": 436,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "d7e8e94169f8991954f20d40e6b46ff15a4035e81ea76c02edd99edc921692ae",
+      "format": "Svg",
+      "byteCount": 865,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "c89971401cffae48f6d8f7330308c99186d119f53b5b29b2127b084883342f70",
+      "format": "Svg",
+      "byteCount": 1063,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "e1f9577878668a4cc3153e8aa5644cc932188ddf55daa216688ece11e9475ff5",
+      "format": "Svg",
+      "byteCount": 1455,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "f67d32745045fcb6978178441f32edf89c51cf184004939621fb353e3f8b688e",
+      "format": "Svg",
+      "byteCount": 337,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "b49e780435ddf1809146034742d8e6c1fec02688d3ad30a9a872c9e79b9870ba",
+      "format": "Svg",
+      "byteCount": 714,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "c0e4b17a764bd15060a744cd1bbcfa38819c82bad0193669862e1ee333dbebfa",
+      "format": "Svg",
+      "byteCount": 2968,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "2cf8ea543f4289bc2f0339d05f62540742713801ca887ac5a8d508811f39112d",
+      "format": "Svg",
+      "byteCount": 464,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "50b5592927dcedffe4a331f32729ef6ceb25e1a6168ed159374c015cf0de25ab",
+      "format": "Svg",
+      "byteCount": 2978,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "91a77174e9f796979e23465f1bf450c717b1b06b919fc707a50f9a9da6a0113c",
+      "format": "Svg",
+      "byteCount": 826,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "65cdfe5269d3a8fc3ea304f39faf91823fa71be2beea873f83d591fa0a319110",
+      "format": "Svg",
+      "byteCount": 661,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "7b5cdbe3ac0238444c223b0ea5a0d9e9fddd7815e99c8a8742ed86a5baec038b",
+      "format": "Svg",
+      "byteCount": 1250,
+      "role": "Control",
+      "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
+    },
+    {
+      "sha256": "3bb5d9b37975a2f0f2fa843be30f6c91b3b95281146759e16957d11e28bae750",
+      "format": "Svg",
+      "byteCount": 90675,
+      "role": "FullController",
+      "viewBox": { "x": 0, "y": 0, "width": 61.175, "height": 26.491 }
+    },
+    {
+      "sha256": "bf6beea734d908a12def1c19c85470db3f3516c224ac691f663f672f7f63cfc9",
+      "format": "Png",
+      "byteCount": 100650,
+      "role": "LeftController",
+      "pixelWidth": 643,
+      "pixelHeight": 464
+    },
+    {
+      "sha256": "472c2b759570013bd74d3ee5fef1cb421fa39361b82f0f2a2fe88d95cb1b23ad",
+      "format": "Png",
+      "byteCount": 127627,
+      "role": "RightController",
+      "pixelWidth": 643,
+      "pixelHeight": 464
+    }
+  ],
+  "controllerImages": {
+    "fullSha256": "3bb5d9b37975a2f0f2fa843be30f6c91b3b95281146759e16957d11e28bae750",
+    "leftSha256": "bf6beea734d908a12def1c19c85470db3f3516c224ac691f663f672f7f63cfc9",
+    "rightSha256": "472c2b759570013bd74d3ee5fef1cb421fa39361b82f0f2a2fe88d95cb1b23ad"
+  },
+  "controls": [
+    {
+      "control": "FaceSouth",
+      "presence": "Present",
+      "physicalLabel": "A",
+      "assetSha256": "0e60bdd5b4b29701e00d692a2d76edefa5d286ff29ad8db30a6d537fe129516f"
+    },
+    {
+      "control": "FaceEast",
+      "presence": "Present",
+      "physicalLabel": "B",
+      "assetSha256": "195063664427c6562a4c5e62eaa3755e5a675bb3e6a9245ab12bae83b4aa2e41"
+    },
+    {
+      "control": "FaceWest",
+      "presence": "Present",
+      "physicalLabel": "X",
+      "assetSha256": "1048f2b14b2a2f65631912f7050b3a4ca89631c3b887efe2ba473b250383bb89"
+    },
+    {
+      "control": "FaceNorth",
+      "presence": "Present",
+      "physicalLabel": "Y",
+      "assetSha256": "9fbf9c5c462a04b35fe7caa071173ea2910c20cededa64d30ebb07a734ef30b5"
+    },
+    {
+      "control": "DpadUp",
+      "presence": "Present",
+      "assetSha256": "a9ff4d709b1793cd6a21db4a939656ea5b9bb8a1a021a2e72584d152d2190083"
+    },
+    {
+      "control": "DpadDown",
+      "presence": "Present",
+      "assetSha256": "1248e2ceef068f49ebebfc4a628d227aa0e12e6e359a2888f41bd3476edf18ee"
+    },
+    {
+      "control": "DpadLeft",
+      "presence": "Present",
+      "assetSha256": "d143165e53de95aff1aba2d2e88b0cc269cfa7eb691e9cbcf94785bf0cf9df4f"
+    },
+    {
+      "control": "DpadRight",
+      "presence": "Present",
+      "assetSha256": "ab1bcf0a20f0daf1e6c6f6cda296b4cfb7ebc31a440c4668bc14b5a31ec6111e"
+    },
+    {
+      "control": "LeftStick",
+      "presence": "Present",
+      "side": "Left",
+      "assetSha256": "8d33976e369ddbb99dbe620b5c0dae284188a65d93355b4919629a457d8abe6f"
+    },
+    {
+      "control": "RightStick",
+      "presence": "Present",
+      "side": "Right",
+      "assetSha256": "d7e8e94169f8991954f20d40e6b46ff15a4035e81ea76c02edd99edc921692ae"
+    },
+    {
+      "control": "LeftShoulder",
+      "presence": "Present",
+      "side": "Left",
+      "physicalLabel": "LB",
+      "assetSha256": "c89971401cffae48f6d8f7330308c99186d119f53b5b29b2127b084883342f70"
+    },
+    {
+      "control": "RightShoulder",
+      "presence": "Present",
+      "side": "Right",
+      "physicalLabel": "RB",
+      "assetSha256": "e1f9577878668a4cc3153e8aa5644cc932188ddf55daa216688ece11e9475ff5"
+    },
+    {
+      "control": "LeftTrigger",
+      "presence": "Present",
+      "side": "Left",
+      "physicalLabel": "LT",
+      "assetSha256": "f67d32745045fcb6978178441f32edf89c51cf184004939621fb353e3f8b688e"
+    },
+    {
+      "control": "RightTrigger",
+      "presence": "Present",
+      "side": "Right",
+      "physicalLabel": "RT",
+      "assetSha256": "b49e780435ddf1809146034742d8e6c1fec02688d3ad30a9a872c9e79b9870ba"
+    },
+    {
+      "control": "Guide",
+      "presence": "Present",
+      "physicalLabel": "MSI",
+      "assetSha256": "c0e4b17a764bd15060a744cd1bbcfa38819c82bad0193669862e1ee333dbebfa"
+    },
+    {
+      "control": "View",
+      "presence": "Present",
+      "assetSha256": "2cf8ea543f4289bc2f0339d05f62540742713801ca887ac5a8d508811f39112d"
+    },
+    {
+      "control": "Menu",
+      "presence": "Present",
+      "assetSha256": "50b5592927dcedffe4a331f32729ef6ceb25e1a6168ed159374c015cf0de25ab"
+    },
+    {
+      "control": "QuickAccess",
+      "presence": "Present",
+      "assetSha256": "91a77174e9f796979e23465f1bf450c717b1b06b919fc707a50f9a9da6a0113c"
+    },
+    {
+      "control": "RearM1",
+      "presence": "Present",
+      "side": "Right",
+      "physicalLabel": "M1",
+      "assetSha256": "65cdfe5269d3a8fc3ea304f39faf91823fa71be2beea873f83d591fa0a319110"
+    },
+    {
+      "control": "RearM2",
+      "presence": "Present",
+      "side": "Left",
+      "physicalLabel": "M2",
+      "assetSha256": "7b5cdbe3ac0238444c223b0ea5a0d9e9fddd7815e99c8a8742ed86a5baec038b"
+    },
+    { "control": "LeftStickTouch", "presence": "Absent" },
+    { "control": "RightStickTouch", "presence": "Absent" }
+  ],
+  "aliases": []
+}
