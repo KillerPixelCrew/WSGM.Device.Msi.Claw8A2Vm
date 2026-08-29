@@ -2,62 +2,65 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using WSGM.Device.Contracts.Capabilities;
-using WSGM.Device.Contracts.Input;
-using WSGM.Device.Contracts.Lifecycle;
+using WSGM.Device.Sdk.Capabilities;
+using WSGM.Device.Sdk.Input;
 using WSGM.Device.Sdk.Lifecycle;
 using WSGM.Device.Sdk.Plugin;
 
 namespace WSGM.Device.Msi.Claw8A2Vm;
 
-internal abstract class ClawResourceBase(string resourceId) : IPluginResource
+internal enum ClawServiceState
 {
-    public string ResourceId { get; } = resourceId;
+    Idle,
+    Acquiring,
+    Owned,
+    Passive,
+    Degraded,
+    Releasing,
+    ReleasedUnverified,
+    Faulted,
+}
 
-    public ResourceState State { get; protected set; } = ResourceState.Idle;
+internal readonly record struct ClawCycleContext(
+    long CycleGeneration,
+    DateTimeOffset Deadline);
+
+internal sealed record ClawServiceResult(
+    ClawServiceState State,
+    CapabilityReason? Reason = null);
+
+internal abstract class ClawServiceStatus(string serviceId)
+{
+    public string ServiceId { get; } = serviceId;
+
+    public ClawServiceState State { get; protected set; } = ClawServiceState.Idle;
 
     public CapabilityReason? Reason { get; private set; }
 
     public CapabilityReason? ReconciliationBlockReason { get; set; }
 
-    public void Quarantine(CapabilityReason reason)
+    internal void ApplyResult(ClawServiceResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        State = result.State;
+        Reason = result.Reason;
+    }
+
+    public void Fault(CapabilityReason reason)
     {
         ArgumentNullException.ThrowIfNull(reason);
         ReconciliationBlockReason = reason;
-        _ = Set(ResourceState.Faulted, reason);
+        _ = Set(ClawServiceState.Faulted, reason);
     }
 
-    public abstract ValueTask<PluginResourceOperationResult> AcquireAsync(
-        PluginResourceOperationContext context,
-        CancellationToken cancellationToken);
-
-    public virtual ValueTask<PluginResourceOperationResult> SuspendAsync(
-        PluginResourceOperationContext context,
-        CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(Result(State));
-    }
-
-    public virtual ValueTask<PluginResourceOperationResult> ResumeAsync(
-        PluginResourceOperationContext context,
-        CancellationToken cancellationToken) => AcquireAsync(context, cancellationToken);
-
-    public abstract ValueTask<PluginResourceOperationResult> ReleaseAsync(
-        PluginResourceOperationContext context,
-        CancellationToken cancellationToken);
-
-    protected PluginResourceOperationResult Set(
-        ResourceState state,
+    protected ClawServiceResult Set(
+        ClawServiceState state,
         CapabilityReason? reason = null)
     {
         State = state;
         Reason = reason;
-        return new PluginResourceOperationResult(state, reason);
+        return new ClawServiceResult(state, reason);
     }
-
-    protected PluginResourceOperationResult Result(ResourceState state, CapabilityReason? reason = null) =>
-        new(state, reason);
 
     protected static void RequireWriteBudget(DateTimeOffset deadline)
     {
@@ -68,45 +71,45 @@ internal abstract class ClawResourceBase(string resourceId) : IPluginResource
     }
 }
 
-internal sealed class OemEventResource(
+internal sealed class OemEventService(
     IMsiOemEventSource source,
-    IPluginHostAdapter host) : ClawResourceBase(ResourceIds.OemEvents)
+    IPluginHostAdapter host) : ClawServiceStatus(ServiceIds.OemEvents)
 {
     private readonly IMsiOemEventSource _source = source ?? throw new ArgumentNullException(nameof(source));
     private readonly IPluginHostAdapter _host = host ?? throw new ArgumentNullException(nameof(host));
-    private long _deviceGeneration;
+    private long _cycleGeneration;
 
-    public override async ValueTask<PluginResourceOperationResult> AcquireAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> AcquireAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
-        _deviceGeneration = context.DeviceGeneration;
+        _cycleGeneration = context.CycleGeneration;
         bool started = await _source.StartAsync(PublishAsync, cancellationToken).ConfigureAwait(false);
         return started
-            ? Set(ResourceState.Owned)
-            : Set(ResourceState.Passive, new CapabilityReason(
+            ? Set(ClawServiceState.Owned)
+            : Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.PrerequisiteMissing,
                 "The MSI_Event provider was unavailable."));
     }
 
-    public override async ValueTask<PluginResourceOperationResult> SuspendAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> SuspendAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         await _source.StopAsync(cancellationToken).ConfigureAwait(false);
-        return Set(ResourceState.Idle);
+        return Set(ClawServiceState.Idle);
     }
 
-    public override ValueTask<PluginResourceOperationResult> ResumeAsync(
-        PluginResourceOperationContext context,
+    public ValueTask<ClawServiceResult> ResumeAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken) => AcquireAsync(context, cancellationToken);
 
-    public override async ValueTask<PluginResourceOperationResult> ReleaseAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> ReleaseAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         await _source.StopAsync(cancellationToken).ConfigureAwait(false);
-        return Set(ResourceState.Idle);
+        return Set(ClawServiceState.Idle);
     }
 
     private ValueTask PublishAsync(byte code, DateTimeOffset timestamp)
@@ -127,17 +130,17 @@ internal sealed class OemEventResource(
             new OemControlEvent(
                 mapped.Value.controlId,
                 mapped.Value.press,
-                _deviceGeneration,
+                _cycleGeneration,
                 timestamp,
                 $"msi-event-{code:X2}-{timestamp.UtcTicks}"),
             CancellationToken.None);
     }
 }
 
-internal sealed class PowerResource(
+internal sealed class PowerService(
     IClawIdentityReader identity,
     ClawA2VmPowerCapability capability,
-    ClawRecoveryJournal journal) : ClawResourceBase(ResourceIds.Power)
+    ClawRecoveryJournal journal) : ClawServiceStatus(ServiceIds.Power)
 {
     private readonly IClawIdentityReader _identity = identity ?? throw new ArgumentNullException(nameof(identity));
     private readonly ClawA2VmPowerCapability _capability = capability ?? throw new ArgumentNullException(nameof(capability));
@@ -146,42 +149,42 @@ internal sealed class PowerResource(
 
     public PowerPair? LastObserved { get; private set; }
 
-    public override async ValueTask<PluginResourceOperationResult> AcquireAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> AcquireAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         if (ReconciliationBlockReason is not null)
         {
-            return Set(ResourceState.Faulted, ReconciliationBlockReason);
+            return Set(ClawServiceState.Faulted, ReconciliationBlockReason);
         }
 
         ClawIdentityState identity = await _identity.ReadAsync(cancellationToken).ConfigureAwait(false);
         if (!identity.ExactMachineMatch || !identity.WmiFirmwareVerified)
         {
-            return Set(ResourceState.Passive, FirmwareReason(identity));
+            return Set(ClawServiceState.Passive, FirmwareReason(identity));
         }
 
         LastObserved = await _capability.ReadAsync(cancellationToken).ConfigureAwait(false);
         _restoreSnapshot ??= LastObserved;
-        return Set(ResourceState.Owned);
+        return Set(ClawServiceState.Owned);
     }
 
     public async ValueTask RefreshAsync(CancellationToken cancellationToken) =>
         LastObserved = await _capability.ReadAsync(cancellationToken).ConfigureAwait(false);
 
-    public override async ValueTask<PluginResourceOperationResult> ReleaseAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> ReleaseAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         if (ReconciliationBlockReason is not null)
         {
-            return Set(ResourceState.Faulted, ReconciliationBlockReason);
+            return Set(ClawServiceState.Faulted, ReconciliationBlockReason);
         }
 
-        if (_restoreSnapshot is null || State is not ResourceState.Owned
-            || !_journal.HasUnrestoredMutation(ResourceId))
+        if (_restoreSnapshot is null || State is not ClawServiceState.Owned
+            || !_journal.HasUnrestoredMutation(ServiceId))
         {
-            return Set(ResourceState.Idle);
+            return Set(ClawServiceState.Idle);
         }
 
         RequireWriteBudget(context.Deadline);
@@ -193,20 +196,20 @@ internal sealed class PowerResource(
         }
         catch
         {
-            await _journal.CompleteResourceRestorationAsync(
-                ResourceId,
-                JournalEntryStatus.RestoreFailed,
+            await _journal.CompleteServiceRestorationAsync(
+                ServiceId,
+                ClawRecoveryStatus.RestoreFailed,
                 CancellationToken.None).ConfigureAwait(false);
             throw;
         }
 
-        await _journal.CompleteResourceRestorationAsync(
-            ResourceId,
-            restored ? JournalEntryStatus.RestoredVerified : JournalEntryStatus.RestoredUnverified,
+        await _journal.CompleteServiceRestorationAsync(
+            ServiceId,
+            restored ? ClawRecoveryStatus.RestoredVerified : ClawRecoveryStatus.RestoredUnverified,
             cancellationToken).ConfigureAwait(false);
         return restored
-            ? Set(ResourceState.Idle)
-            : Set(ResourceState.ReleasedUnverified, new CapabilityReason(
+            ? Set(ClawServiceState.Idle)
+            : Set(ClawServiceState.ReleasedUnverified, new CapabilityReason(
                 CapabilityReasonCode.TransportFaulted,
                 "The captured power pair or scenario could not be verified after restoration."));
     }
@@ -220,10 +223,10 @@ internal sealed class PowerResource(
             "The exact MS-1T52 identity no longer matches.");
 }
 
-internal sealed class FanResource(
+internal sealed class FanService(
     IClawIdentityReader identity,
     ClawA2VmFanCapability capability,
-    ClawRecoveryJournal journal) : ClawResourceBase(ResourceIds.Fans)
+    ClawRecoveryJournal journal) : ClawServiceStatus(ServiceIds.Fans)
 {
     private readonly IClawIdentityReader _identity = identity ?? throw new ArgumentNullException(nameof(identity));
     private readonly ClawA2VmFanCapability _capability = capability ?? throw new ArgumentNullException(nameof(capability));
@@ -232,19 +235,19 @@ internal sealed class FanResource(
 
     public FanSnapshot? LastObserved { get; private set; }
 
-    public override async ValueTask<PluginResourceOperationResult> AcquireAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> AcquireAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         if (ReconciliationBlockReason is not null)
         {
-            return Set(ResourceState.Faulted, ReconciliationBlockReason);
+            return Set(ClawServiceState.Faulted, ReconciliationBlockReason);
         }
 
         ClawIdentityState identity = await _identity.ReadAsync(cancellationToken).ConfigureAwait(false);
         if (!identity.ExactMachineMatch || !identity.WmiFirmwareVerified)
         {
-            return Set(ResourceState.Passive, new CapabilityReason(
+            return Set(ClawServiceState.Passive, new CapabilityReason(
                 identity.ExactMachineMatch
                     ? CapabilityReasonCode.FirmwareNotVerified
                     : CapabilityReasonCode.GenerationChanged,
@@ -253,25 +256,25 @@ internal sealed class FanResource(
 
         LastObserved = await _capability.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
         _restoreSnapshot ??= LastObserved;
-        return Set(ResourceState.Owned);
+        return Set(ClawServiceState.Owned);
     }
 
     public async ValueTask RefreshAsync(CancellationToken cancellationToken) =>
         LastObserved = await _capability.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
 
-    public override async ValueTask<PluginResourceOperationResult> ReleaseAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> ReleaseAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         if (ReconciliationBlockReason is not null)
         {
-            return Set(ResourceState.Faulted, ReconciliationBlockReason);
+            return Set(ClawServiceState.Faulted, ReconciliationBlockReason);
         }
 
-        if (_restoreSnapshot is null || State is not ResourceState.Owned
-            || !_journal.HasUnrestoredMutation(ResourceId))
+        if (_restoreSnapshot is null || State is not ClawServiceState.Owned
+            || !_journal.HasUnrestoredMutation(ServiceId))
         {
-            return Set(ResourceState.Idle);
+            return Set(ClawServiceState.Idle);
         }
 
         RequireWriteBudget(context.Deadline);
@@ -283,28 +286,28 @@ internal sealed class FanResource(
         }
         catch
         {
-            await _journal.CompleteResourceRestorationAsync(
-                ResourceId,
-                JournalEntryStatus.RestoreFailed,
+            await _journal.CompleteServiceRestorationAsync(
+                ServiceId,
+                ClawRecoveryStatus.RestoreFailed,
                 CancellationToken.None).ConfigureAwait(false);
             throw;
         }
 
-        await _journal.CompleteResourceRestorationAsync(
-            ResourceId,
-            restored ? JournalEntryStatus.RestoredVerified : JournalEntryStatus.RestoredUnverified,
+        await _journal.CompleteServiceRestorationAsync(
+            ServiceId,
+            restored ? ClawRecoveryStatus.RestoredVerified : ClawRecoveryStatus.RestoredUnverified,
             cancellationToken).ConfigureAwait(false);
         return restored
-            ? Set(ResourceState.Idle)
-            : Set(ResourceState.ReleasedUnverified, new CapabilityReason(
+            ? Set(ClawServiceState.Idle)
+            : Set(ClawServiceState.ReleasedUnverified, new CapabilityReason(
                 CapabilityReasonCode.TransportFaulted,
                 "The captured left/right fan tables or flags could not be verified after restoration."));
     }
 }
 
-internal sealed class TelemetryResource(
+internal sealed class TelemetryService(
     IClawIdentityReader identity,
-    ClawA2VmFanCapability capability) : ClawResourceBase(ResourceIds.Telemetry)
+    ClawA2VmFanCapability capability) : ClawServiceStatus(ServiceIds.Telemetry)
 {
     private readonly IClawIdentityReader _identity = identity ?? throw new ArgumentNullException(nameof(identity));
     private readonly ClawA2VmFanCapability _capability = capability ?? throw new ArgumentNullException(nameof(capability));
@@ -314,36 +317,36 @@ internal sealed class TelemetryResource(
     public async ValueTask RefreshAsync(CancellationToken cancellationToken) =>
         LastTelemetry = await _capability.ReadTelemetryAsync(cancellationToken).ConfigureAwait(false);
 
-    public override async ValueTask<PluginResourceOperationResult> AcquireAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> AcquireAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         ClawIdentityState identity = await _identity.ReadAsync(cancellationToken).ConfigureAwait(false);
         if (!identity.ExactMachineMatch || !identity.WmiFirmwareVerified)
         {
-            return Set(ResourceState.Passive, new CapabilityReason(
+            return Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.PrerequisiteMissing,
                 "MSI telemetry requires the exact reviewed MSI_ACPI provider."));
         }
 
         LastTelemetry = await _capability.ReadTelemetryAsync(cancellationToken).ConfigureAwait(false);
-        return Set(ResourceState.Owned);
+        return Set(ClawServiceState.Owned);
     }
 
-    public override ValueTask<PluginResourceOperationResult> ReleaseAsync(
-        PluginResourceOperationContext context,
+    public ValueTask<ClawServiceResult> ReleaseAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         LastTelemetry = null;
-        return ValueTask.FromResult(Set(ResourceState.Idle));
+        return ValueTask.FromResult(Set(ClawServiceState.Idle));
     }
 }
 
-internal sealed class LightingResource(
+internal sealed class LightingService(
     IClawIdentityReader identity,
     IClawMcuTransport transport,
-    ClawA2VmLightingCapability capability) : ClawResourceBase(ResourceIds.Lighting)
+    ClawA2VmLightingCapability capability) : ClawServiceStatus(ServiceIds.Lighting)
 {
     private readonly IClawIdentityReader _identity = identity ?? throw new ArgumentNullException(nameof(identity));
     private readonly IClawMcuTransport _transport = transport ?? throw new ArgumentNullException(nameof(transport));
@@ -354,48 +357,48 @@ internal sealed class LightingResource(
     public async ValueTask RefreshAsync(CancellationToken cancellationToken) =>
         LastObserved = await _capability.ReadAsync(cancellationToken).ConfigureAwait(false);
 
-    public override async ValueTask<PluginResourceOperationResult> AcquireAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> AcquireAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         ClawIdentityState identity = await _identity.ReadAsync(cancellationToken).ConfigureAwait(false);
         if (!identity.ExactMachineMatch || !identity.McuFirmwareVerified)
         {
-            return Set(ResourceState.Passive, new CapabilityReason(
+            return Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.FirmwareNotVerified,
                 "Lighting writes are gated to controller firmware 0x0229 and profile base 0x024A."));
         }
 
         if (!await _transport.IsAvailableAsync(cancellationToken).ConfigureAwait(false))
         {
-            return Set(ResourceState.Passive, new CapabilityReason(
+            return Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.PrerequisiteMissing,
                 "The reviewed MCU HID collection was unavailable."));
         }
 
         LastObserved = await _capability.ReadAsync(cancellationToken).ConfigureAwait(false);
-        return Set(ResourceState.Owned);
+        return Set(ClawServiceState.Owned);
     }
 
-    public override ValueTask<PluginResourceOperationResult> ReleaseAsync(
-        PluginResourceOperationContext context,
+    public ValueTask<ClawServiceResult> ReleaseAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         // RGB profile writes are intentionally persistent user choices. Deactivation never rewrites
         // the captured profile and therefore cannot silently undo the requested setting.
-        return ValueTask.FromResult(Set(ResourceState.Idle));
+        return ValueTask.FromResult(Set(ClawServiceState.Idle));
     }
 }
 
-internal sealed class MotionResource(IClawMotionSource source) : ClawResourceBase(ResourceIds.Motion)
+internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatus(ServiceIds.Motion)
 {
     private readonly IClawMotionSource _source = source ?? throw new ArgumentNullException(nameof(source));
 
     public MotionSample? Latest { get; private set; }
 
-    public override async ValueTask<PluginResourceOperationResult> AcquireAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> AcquireAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         bool started = await _source.StartAsync(
@@ -406,53 +409,52 @@ internal sealed class MotionResource(IClawMotionSource source) : ClawResourceBas
             },
             cancellationToken).ConfigureAwait(false);
         return started
-            ? Set(ResourceState.Owned)
-            : Set(ResourceState.Passive, new CapabilityReason(
+            ? Set(ClawServiceState.Owned)
+            : Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.PrerequisiteMissing,
                 "The Intel ISS gyrometer was unavailable; no accelerometer fallback exists."));
     }
 
-    public override async ValueTask<PluginResourceOperationResult> SuspendAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> SuspendAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         await _source.StopAsync(cancellationToken).ConfigureAwait(false);
         Latest = null;
-        return Set(ResourceState.Idle);
+        return Set(ClawServiceState.Idle);
     }
 
-    public override ValueTask<PluginResourceOperationResult> ResumeAsync(
-        PluginResourceOperationContext context,
+    public ValueTask<ClawServiceResult> ResumeAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken) => AcquireAsync(context, cancellationToken);
 
-    public override async ValueTask<PluginResourceOperationResult> ReleaseAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> ReleaseAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         await _source.StopAsync(cancellationToken).ConfigureAwait(false);
         Latest = null;
-        return Set(ResourceState.Idle);
+        return Set(ClawServiceState.Idle);
     }
 }
 
-internal sealed class ControllerResource(
+internal sealed class ControllerService(
     IClawIdentityReader identity,
     IClawMcuTransport mcu,
     IClawControllerSource source,
-    MotionResource motion,
+    MotionService motion,
     IPluginHostAdapter host,
-    ClawRecoveryJournal journal) : ClawResourceBase(ResourceIds.Controller)
+    ClawRecoveryJournal journal) : ClawServiceStatus(ServiceIds.Controller)
 {
     private readonly IClawIdentityReader _identity = identity ?? throw new ArgumentNullException(nameof(identity));
     private readonly IClawMcuTransport _mcu = mcu ?? throw new ArgumentNullException(nameof(mcu));
     private readonly IClawControllerSource _source = source ?? throw new ArgumentNullException(nameof(source));
-    private readonly MotionResource _motion = motion ?? throw new ArgumentNullException(nameof(motion));
+    private readonly MotionService _motion = motion ?? throw new ArgumentNullException(nameof(motion));
     private readonly IPluginHostAdapter _host = host ?? throw new ArgumentNullException(nameof(host));
     private readonly ClawRecoveryJournal _journal = journal ?? throw new ArgumentNullException(nameof(journal));
     private ControllerTopology? _original;
     private ControllerTopology? _current;
     private CanonicalButtons _rearButtons;
-    private RecoveryJournalEntry? _modeJournalEntry;
     private readonly object _hapticGate = new();
     private readonly SemaphoreSlim _outputSerializer = new(1, 1);
     private byte _lastWeak;
@@ -465,13 +467,13 @@ internal sealed class ControllerResource(
 
     public IReadOnlyList<PhysicalDeviceIdentity> LastReleasedDevices { get; private set; } = [];
 
-    public override async ValueTask<PluginResourceOperationResult> AcquireAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> AcquireAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         if (!Enabled)
         {
-            return Set(ResourceState.Passive, new CapabilityReason(
+            return Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.ResourceReleased,
                 "Controller management is disabled."));
         }
@@ -480,13 +482,13 @@ internal sealed class ControllerResource(
 
         if (ReconciliationBlockReason is not null)
         {
-            return Set(ResourceState.Faulted, ReconciliationBlockReason);
+            return Set(ClawServiceState.Faulted, ReconciliationBlockReason);
         }
 
         ClawIdentityState identity = await _identity.ReadAsync(cancellationToken).ConfigureAwait(false);
         if (!identity.ExactMachineMatch || !identity.McuFirmwareVerified)
         {
-            return Set(ResourceState.Passive, new CapabilityReason(
+            return Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.FirmwareNotVerified,
                 "Controller ownership is gated to exact MS-1T52 firmware 0x0229."));
         }
@@ -499,7 +501,7 @@ internal sealed class ControllerResource(
                 observed.PhysicalLocation,
                 _original.PhysicalLocation))
         {
-            return Set(ResourceState.Passive, new CapabilityReason(
+            return Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.PrerequisiteMissing,
                 "The physical controller or its composite USB location was unavailable."));
         }
@@ -508,26 +510,18 @@ internal sealed class ControllerResource(
         if (_current.Mode is not ClawControllerMode.DirectInput)
         {
             RequireWriteBudget(context.Deadline);
-            _modeJournalEntry = await _journal.BeginAsync(
-                ResourceId,
+            _ = await _journal.BeginAsync(
+                ServiceId,
                 CapabilityIds.Controller,
                 ClawFirmwareIdentities.Mcu,
                 ClawRecoveryValues.ControllerMode(_original.Mode),
-                ClawRecoveryValues.ControllerMode(ClawControllerMode.DirectInput),
                 cancellationToken).ConfigureAwait(false);
-            _modeJournalEntry = await _journal.MarkApplyingAsync(_modeJournalEntry, cancellationToken)
-                .ConfigureAwait(false);
             try
             {
                 _current = await _mcu.SwitchModeAsync(
                     ClawControllerMode.DirectInput,
                     _original.PhysicalLocation,
                     context.Deadline,
-                    cancellationToken).ConfigureAwait(false);
-                _modeJournalEntry = await _journal.MarkAppliedAsync(
-                    _modeJournalEntry,
-                    ClawRecoveryValues.ControllerMode(_current.Mode),
-                    verified: true,
                     cancellationToken).ConfigureAwait(false);
             }
             catch
@@ -540,7 +534,7 @@ internal sealed class ControllerResource(
         if (_current.PhysicalDevices.Count == 0)
         {
             await RestoreAfterFailedAcquireAsync(context.Deadline).ConfigureAwait(false);
-            return Set(ResourceState.Passive, new CapabilityReason(
+            return Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.PrerequisiteMissing,
                 "No exact DirectInput physical interface identity was available for handoff."));
         }
@@ -548,7 +542,7 @@ internal sealed class ControllerResource(
         try
         {
             await _source.StartAsync(
-                context.DeviceGeneration,
+                context.CycleGeneration,
                 PublishControllerSampleAsync,
                 cancellationToken).ConfigureAwait(false);
         }
@@ -560,30 +554,30 @@ internal sealed class ControllerResource(
 
         await _host.PublishPhysicalDevicesAsync(_current.PhysicalDevices, cancellationToken)
             .ConfigureAwait(false);
-        return Set(ResourceState.Owned);
+        return Set(ClawServiceState.Owned);
     }
 
-    public override async ValueTask<PluginResourceOperationResult> SuspendAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> SuspendAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         await StopOutputAndAcquisitionAsync(cancellationToken).ConfigureAwait(false);
-        return Set(ResourceState.Idle);
+        return Set(ClawServiceState.Idle);
     }
 
-    public override ValueTask<PluginResourceOperationResult> ResumeAsync(
-        PluginResourceOperationContext context,
+    public ValueTask<ClawServiceResult> ResumeAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken) => AcquireAsync(context, cancellationToken);
 
-    public override async ValueTask<PluginResourceOperationResult> ReleaseAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> ReleaseAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         ControllerHandoffResult result = await ReleaseControllerAsync(context.Deadline, cancellationToken)
             .ConfigureAwait(false);
         return result is ControllerHandoffResult.ReleasedVerified
-            ? Set(ResourceState.Idle)
-            : Set(ResourceState.ReleasedUnverified, new CapabilityReason(
+            ? Set(ClawServiceState.Idle)
+            : Set(ClawServiceState.ReleasedUnverified, new CapabilityReason(
                 CapabilityReasonCode.TransportFaulted,
                 "Controller mode or physical USB topology restoration was not verified."));
     }
@@ -592,11 +586,11 @@ internal sealed class ControllerResource(
         DateTimeOffset deadline,
         CancellationToken cancellationToken)
     {
-        _ = Set(ResourceState.Releasing);
+        _ = Set(ClawServiceState.Releasing);
         await StopOutputAndAcquisitionAsync(cancellationToken).ConfigureAwait(false);
         if (ReconciliationBlockReason is not null)
         {
-            _ = Set(ResourceState.ReleasedUnverified, ReconciliationBlockReason);
+            _ = Set(ClawServiceState.ReleasedUnverified, ReconciliationBlockReason);
             return ControllerHandoffResult.ReleasedUnverified;
         }
 
@@ -604,19 +598,19 @@ internal sealed class ControllerResource(
         {
             _current = null;
             LastReleasedDevices = [];
-            if (_journal.HasUnrestoredMutation(ResourceId))
+            if (_journal.HasUnrestoredMutation(ServiceId))
             {
-                _ = Set(ResourceState.ReleasedUnverified, new CapabilityReason(
+                _ = Set(ClawServiceState.ReleasedUnverified, new CapabilityReason(
                     CapabilityReasonCode.TransportFaulted,
                     "Controller topology disappeared before its original mode could be verified."));
-                await _journal.CompleteResourceRestorationAsync(
-                    ResourceId,
-                    JournalEntryStatus.RestoreFailed,
+                await _journal.CompleteServiceRestorationAsync(
+                    ServiceId,
+                    ClawRecoveryStatus.RestoreFailed,
                     CancellationToken.None).ConfigureAwait(false);
                 return ControllerHandoffResult.ReleasedUnverified;
             }
 
-            _ = Set(ResourceState.Idle);
+            _ = Set(ClawServiceState.Idle);
             return ControllerHandoffResult.ReleasedVerified;
         }
 
@@ -637,10 +631,10 @@ internal sealed class ControllerResource(
                 CapabilityReason reason = new(
                     CapabilityReasonCode.TransportFaulted,
                     "The original controller mode could not be restored.");
-                Quarantine(reason);
-                await _journal.CompleteResourceRestorationAsync(
-                    ResourceId,
-                    JournalEntryStatus.RestoreFailed,
+                Fault(reason);
+                await _journal.CompleteServiceRestorationAsync(
+                    ServiceId,
+                    ClawRecoveryStatus.RestoreFailed,
                     CancellationToken.None).ConfigureAwait(false);
                 throw;
             }
@@ -653,12 +647,12 @@ internal sealed class ControllerResource(
             {
                 _current = restored;
                 LastReleasedDevices = restored.PhysicalDevices;
-                _ = Set(ResourceState.ReleasedUnverified, new CapabilityReason(
+                _ = Set(ClawServiceState.ReleasedUnverified, new CapabilityReason(
                     CapabilityReasonCode.TransportFaulted,
                     "The original controller topology was not verified after restoration."));
-                await _journal.CompleteResourceRestorationAsync(
-                    ResourceId,
-                    JournalEntryStatus.RestoredUnverified,
+                await _journal.CompleteServiceRestorationAsync(
+                    ServiceId,
+                    ClawRecoveryStatus.RestoredUnverified,
                     cancellationToken).ConfigureAwait(false);
                 return ControllerHandoffResult.ReleasedUnverified;
             }
@@ -668,11 +662,11 @@ internal sealed class ControllerResource(
 
         LastReleasedDevices = _current.PhysicalDevices;
         _current = null;
-        _ = Set(ResourceState.Idle);
+        _ = Set(ClawServiceState.Idle);
         _rearButtons = CanonicalButtons.None;
-        await _journal.CompleteResourceRestorationAsync(
-            ResourceId,
-            JournalEntryStatus.RestoredVerified,
+        await _journal.CompleteServiceRestorationAsync(
+            ServiceId,
+            ClawRecoveryStatus.RestoredVerified,
             cancellationToken).ConfigureAwait(false);
         return ControllerHandoffResult.ReleasedVerified;
     }
@@ -684,7 +678,7 @@ internal sealed class ControllerResource(
         await _outputSerializer.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (State is not ResourceState.Owned)
+            if (State is not ClawServiceState.Owned)
             {
                 return;
             }
@@ -798,7 +792,7 @@ internal sealed class ControllerResource(
             new OemControlEvent(
                 controlId,
                 OemPressKind.Short,
-                sample.DeviceGeneration,
+                sample.CycleGeneration,
                 sample.Timestamp,
                 $"claw-hid-{controlId}-{sample.Sequence}",
                 pressed ? OemControlEdge.Pressed : OemControlEdge.Released),
@@ -816,10 +810,10 @@ internal sealed class ControllerResource(
                 CapabilityReason reason = new(
                     CapabilityReasonCode.TransportFaulted,
                     "Controller topology vanished during acquisition rollback.");
-                Quarantine(reason);
-                await _journal.CompleteResourceRestorationAsync(
-                    ResourceId,
-                    JournalEntryStatus.RestoreFailed,
+                Fault(reason);
+                await _journal.CompleteServiceRestorationAsync(
+                    ServiceId,
+                    ClawRecoveryStatus.RestoreFailed,
                     CancellationToken.None).ConfigureAwait(false);
                 return;
             }
@@ -829,12 +823,12 @@ internal sealed class ControllerResource(
         }
         catch
         {
-            Quarantine(new CapabilityReason(
+            Fault(new CapabilityReason(
                 CapabilityReasonCode.TransportFaulted,
                 "Controller acquisition rollback failed."));
-            await _journal.CompleteResourceRestorationAsync(
-                ResourceId,
-                JournalEntryStatus.RestoreFailed,
+            await _journal.CompleteServiceRestorationAsync(
+                ServiceId,
+                ClawRecoveryStatus.RestoreFailed,
                 CancellationToken.None).ConfigureAwait(false);
         }
     }
@@ -843,56 +837,56 @@ internal sealed class ControllerResource(
         checked((byte)Math.Round(Math.Clamp(value, 0, 1) * byte.MaxValue));
 }
 
-internal sealed class ChordSuppressorResource(
+internal sealed class ChordSuppressorService(
     IFirmwareChordSuppressor suppressor,
-    OemEventResource oemEvents) : ClawResourceBase(ResourceIds.ChordSuppressor)
+    OemEventService oemEvents) : ClawServiceStatus(ServiceIds.ChordSuppressor)
 {
     private readonly IFirmwareChordSuppressor _suppressor = suppressor
         ?? throw new ArgumentNullException(nameof(suppressor));
-    private readonly OemEventResource _oemEvents = oemEvents
+    private readonly OemEventService _oemEvents = oemEvents
         ?? throw new ArgumentNullException(nameof(oemEvents));
 
-    public override async ValueTask<PluginResourceOperationResult> AcquireAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> AcquireAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
-        if (_oemEvents.State is not ResourceState.Owned)
+        if (_oemEvents.State is not ClawServiceState.Owned)
         {
-            return Set(ResourceState.Passive, new CapabilityReason(
+            return Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.PrerequisiteMissing,
                 "Chord suppression starts only when the device-identified MSI OEM event source is healthy."));
         }
 
         bool started = await _suppressor.StartAsync(cancellationToken).ConfigureAwait(false);
         return started
-            ? Set(ResourceState.Owned)
-            : Set(ResourceState.Degraded, new CapabilityReason(
+            ? Set(ClawServiceState.Owned)
+            : Set(ClawServiceState.Degraded, new CapabilityReason(
                 CapabilityReasonCode.TransportFaulted,
                 "The bounded low-level keyboard hook could not be installed."));
     }
 
-    public override async ValueTask<PluginResourceOperationResult> SuspendAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> SuspendAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         await _suppressor.StopAsync(cancellationToken).ConfigureAwait(false);
-        return Set(ResourceState.Idle);
+        return Set(ClawServiceState.Idle);
     }
 
-    public override ValueTask<PluginResourceOperationResult> ResumeAsync(
-        PluginResourceOperationContext context,
+    public ValueTask<ClawServiceResult> ResumeAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken) => AcquireAsync(context, cancellationToken);
 
-    public override async ValueTask<PluginResourceOperationResult> ReleaseAsync(
-        PluginResourceOperationContext context,
+    public async ValueTask<ClawServiceResult> ReleaseAsync(
+        ClawCycleContext context,
         CancellationToken cancellationToken)
     {
         await _suppressor.StopAsync(cancellationToken).ConfigureAwait(false);
-        return Set(ResourceState.Idle);
+        return Set(ClawServiceState.Idle);
     }
 }
 
-internal static class ResourceIds
+internal static class ServiceIds
 {
     public const string OemEvents = "msi-oem-events";
     public const string Power = "msi-power";

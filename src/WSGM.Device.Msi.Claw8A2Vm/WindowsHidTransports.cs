@@ -7,7 +7,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
-using WSGM.Device.Contracts.Input;
+using WSGM.Device.Sdk.Input;
 
 namespace WSGM.Device.Msi.Claw8A2Vm;
 
@@ -271,7 +271,7 @@ internal sealed class WindowsClawControllerSource : IClawControllerSource
     }
 
     public async ValueTask StartAsync(
-        long deviceGeneration,
+        long cycleGeneration,
         Func<CanonicalControllerSample, ValueTask> publish,
         CancellationToken cancellationToken)
     {
@@ -292,7 +292,7 @@ internal sealed class WindowsClawControllerSource : IClawControllerSource
             _sequence = 0;
             _readerTask = ReadLoopAsync(
                 _stream,
-                deviceGeneration,
+                cycleGeneration,
                 publish,
                 firstSample,
                 _readerCancellation.Token);
@@ -402,7 +402,7 @@ internal sealed class WindowsClawControllerSource : IClawControllerSource
 
     private async Task ReadLoopAsync(
         FileStream stream,
-        long deviceGeneration,
+        long cycleGeneration,
         Func<CanonicalControllerSample, ValueTask> publish,
         TaskCompletionSource firstSample,
         CancellationToken cancellationToken)
@@ -434,7 +434,7 @@ internal sealed class WindowsClawControllerSource : IClawControllerSource
             CanonicalControllerSample sample = ClawControllerCodec.Decode(
                 report,
                 Interlocked.Increment(ref _sequence),
-                deviceGeneration,
+                cycleGeneration,
                 DateTimeOffset.UtcNow,
                 quality);
             await publish(sample).ConfigureAwait(false);

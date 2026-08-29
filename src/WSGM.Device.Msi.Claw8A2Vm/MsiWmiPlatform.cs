@@ -7,7 +7,7 @@ using System.Management;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using WSGM.Device.Contracts.Identity;
+using WSGM.Device.Sdk.Identity;
 
 namespace WSGM.Device.Msi.Claw8A2Vm;
 

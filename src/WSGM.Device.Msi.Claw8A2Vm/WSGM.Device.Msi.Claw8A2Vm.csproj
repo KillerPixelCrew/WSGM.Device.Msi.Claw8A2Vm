@@ -5,8 +5,9 @@
     <AssemblyName>WSGM.Device.Msi.Claw8A2Vm</AssemblyName>
     <RootNamespace>WSGM.Device.Msi.Claw8A2Vm</RootNamespace>
     <!-- Loaded by WSGM.DeviceHost at runtime from its package directory, never
-         referenced by WSGM. Nothing in the solution may add a ProjectReference to
-         this file; the dependency-direction test in tests/WSGM.Tests enforces it. -->
+         referenced by a production project. The consolidated WSGM.Device.Tests
+         project is the sole compile-time exception for fake-hardware regression tests;
+         the dependency-direction test in tests/WSGM.Tests enforces that boundary. -->
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
@@ -16,11 +17,7 @@
     <PackageReference Include="System.Management" Version="10.0.0" />
   </ItemGroup>
   <ItemGroup>
-    <InternalsVisibleTo Include="WSGM.Device.Msi.Claw8A2Vm.Tests" />
-  </ItemGroup>
-  <ItemGroup>
     <None Update="plugin.wsgm.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <None Update="evidence.lock.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Update="PROVENANCE.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Update="THIRD_PARTY_NOTICES.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\LICENSE" Link="LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

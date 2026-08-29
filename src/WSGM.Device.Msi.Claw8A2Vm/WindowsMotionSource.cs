@@ -3,7 +3,7 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Windows.Devices.Sensors;
-using WSGM.Device.Contracts.Input;
+using WSGM.Device.Sdk.Input;
 
 namespace WSGM.Device.Msi.Claw8A2Vm;
 

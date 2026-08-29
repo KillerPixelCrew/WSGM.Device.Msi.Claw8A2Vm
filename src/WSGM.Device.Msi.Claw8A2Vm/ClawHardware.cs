@@ -2,8 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using WSGM.Device.Contracts.Identity;
-using WSGM.Device.Contracts.Input;
+using WSGM.Device.Sdk.Identity;
+using WSGM.Device.Sdk.Input;
 
 namespace WSGM.Device.Msi.Claw8A2Vm;
 
@@ -136,7 +136,7 @@ internal interface IClawControllerSource : IAsyncDisposable
     ValueTask<ControllerTopology?> DiscoverAsync(CancellationToken cancellationToken);
 
     ValueTask StartAsync(
-        long deviceGeneration,
+        long cycleGeneration,
         Func<CanonicalControllerSample, ValueTask> publish,
         CancellationToken cancellationToken);
 

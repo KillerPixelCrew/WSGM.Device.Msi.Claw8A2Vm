@@ -2,7 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
-using WSGM.Device.Contracts.Input;
+using WSGM.Device.Sdk.Input;
 
 namespace WSGM.Device.Msi.Claw8A2Vm;
 
@@ -11,7 +11,7 @@ internal static class ClawControllerCodec
     public static CanonicalControllerSample Decode(
         ReadOnlySpan<byte> report,
         long sequence,
-        long deviceGeneration,
+        long cycleGeneration,
         DateTimeOffset timestamp,
         SampleQuality quality = SampleQuality.Good)
     {
@@ -40,7 +40,7 @@ internal static class ClawControllerCodec
         return new CanonicalControllerSample
         {
             Sequence = sequence,
-            DeviceGeneration = deviceGeneration,
+            CycleGeneration = cycleGeneration,
             Timestamp = timestamp,
             Buttons = buttons,
             LeftStickX = Axis(report[1]),

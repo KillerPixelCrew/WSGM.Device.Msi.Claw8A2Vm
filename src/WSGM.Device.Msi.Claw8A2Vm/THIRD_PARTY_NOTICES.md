@@ -1,7 +1,7 @@
 # Third-party notices
 
-The built package includes Microsoft's `System.Management` .NET library, licensed under the MIT
-License.
+The built package includes Microsoft's `System.Management` 10.0.0 .NET library and its
+`System.CodeDom` 10.0.0 dependency, both licensed under the MIT License.
 
 Copyright (c) .NET Foundation and Contributors
 

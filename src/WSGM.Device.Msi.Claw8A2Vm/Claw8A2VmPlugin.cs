@@ -3,10 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using WSGM.Device.Contracts.Capabilities;
-using WSGM.Device.Contracts.Input;
-using WSGM.Device.Contracts.Lifecycle;
 using WSGM.Device.Sdk.Capabilities;
+using WSGM.Device.Sdk.Input;
 using WSGM.Device.Sdk.Lifecycle;
 using WSGM.Device.Sdk.Plugin;
 
@@ -16,27 +14,23 @@ namespace WSGM.Device.Msi.Claw8A2Vm;
 public sealed class Claw8A2VmPlugin : IDevicePlugin
 {
     private readonly ClawHardwareServices _services;
-    private readonly Dictionary<string, CapabilityCommandResult> _idempotency = new(StringComparer.Ordinal);
-    private readonly Queue<string> _idempotencyOrder = new();
-    private readonly object _commandGate = new();
     private readonly SemaphoreSlim _commandSerializer = new(1, 1);
     private IPluginHostAdapter? _host;
-    private PluginResourceCoordinator? _coordinator;
-    private CapabilityRegistry? _registry;
-    private OemEventResource? _oem;
-    private PowerResource? _power;
-    private FanResource? _fans;
-    private TelemetryResource? _telemetry;
-    private LightingResource? _lighting;
-    private MotionResource? _motion;
-    private ControllerResource? _controller;
-    private ChordSuppressorResource? _suppressor;
+    private CapabilityDescriptorSet? _descriptorSet;
+    private IReadOnlyList<ClawServiceStatus> _serviceStatuses = [];
+    private OemEventService? _oem;
+    private PowerService? _power;
+    private FanService? _fans;
+    private TelemetryService? _telemetry;
+    private LightingService? _lighting;
+    private MotionService? _motion;
+    private ControllerService? _controller;
+    private ChordSuppressorService? _suppressor;
     private ClawRecoveryJournal? _journal;
     private ClawA2VmPowerCapability? _powerCapability;
     private ClawA2VmFanCapability? _fanCapability;
     private ClawA2VmLightingCapability? _lightingCapability;
-    private long _hostGeneration;
-    private long _deviceGeneration;
+    private long _cycleGeneration;
     private bool _active;
     private bool _quiescing;
     private bool _disposed;
@@ -76,8 +70,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     }
 
     /// <inheritdoc />
-    public async ValueTask ActivateAsync(
-        PluginActivationContext context,
+    public async ValueTask<PluginStartResult> StartAsync(
+        PluginStartContext context,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -95,10 +89,9 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             throw new InvalidOperationException("DeviceHost supplied a different device definition.");
         }
 
-        if (context.HostGeneration != context.Host.HostGeneration
-            || context.DeviceGeneration != context.Host.DeviceGeneration)
+        if (context.CycleGeneration != context.Host.CycleGeneration)
         {
-            throw new InvalidOperationException("DeviceHost supplied inconsistent activation generations.");
+            throw new InvalidOperationException("DeviceHost supplied an inconsistent cycle generation.");
         }
 
         ClawIdentityState identity = await _services.Identity.ReadAsync(cancellationToken).ConfigureAwait(false);
@@ -108,14 +101,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         }
 
         _host = context.Host;
-        _hostGeneration = context.HostGeneration;
-        _deviceGeneration = context.DeviceGeneration;
+        _cycleGeneration = context.CycleGeneration;
         _quiescing = false;
-        lock (_commandGate)
-        {
-            _idempotency.Clear();
-            _idempotencyOrder.Clear();
-        }
 
         var powerCapability = new ClawA2VmPowerCapability(_services.Wmi);
         var fanCapability = new ClawA2VmFanCapability(_services.Wmi);
@@ -123,14 +110,15 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         _powerCapability = powerCapability;
         _fanCapability = fanCapability;
         _lightingCapability = lightingCapability;
-        _journal = new ClawRecoveryJournal(context.Host, context.OutstandingJournalEntries);
-        _oem = new OemEventResource(_services.OemEvents, context.Host);
-        _power = new PowerResource(_services.Identity, powerCapability, _journal);
-        _fans = new FanResource(_services.Identity, fanCapability, _journal);
-        _telemetry = new TelemetryResource(_services.Identity, fanCapability);
-        _lighting = new LightingResource(_services.Identity, _services.Mcu, lightingCapability);
-        _motion = new MotionResource(_services.Motion);
-        _controller = new ControllerResource(
+        _journal = await ClawRecoveryJournal.OpenAsync(context.StateDirectory, cancellationToken)
+            .ConfigureAwait(false);
+        _oem = new OemEventService(_services.OemEvents, context.Host);
+        _power = new PowerService(_services.Identity, powerCapability, _journal);
+        _fans = new FanService(_services.Identity, fanCapability, _journal);
+        _telemetry = new TelemetryService(_services.Identity, fanCapability);
+        _lighting = new LightingService(_services.Identity, _services.Mcu, lightingCapability);
+        _motion = new MotionService(_services.Motion);
+        _controller = new ControllerService(
             _services.Identity,
             _services.Mcu,
             _services.Controller,
@@ -140,9 +128,9 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         {
             Enabled = context.ControllerManagementEnabled,
         };
-        _suppressor = new ChordSuppressorResource(_services.ChordSuppressor, _oem);
+        _suppressor = new ChordSuppressorService(_services.ChordSuppressor, _oem);
 
-        ClawResourceBase[] resources =
+        _serviceStatuses =
         [
             _oem,
             _power,
@@ -153,31 +141,39 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             _controller,
             _suppressor,
         ];
-        _coordinator = new PluginResourceCoordinator(context.Host, resources);
-        _registry = BuildRegistry(powerCapability, fanCapability, lightingCapability);
+        BuildCapabilitySurface();
 
-        await ReconcileOutstandingAsync(
-            context.OutstandingJournalEntries,
-            identity,
-            powerCapability,
-            fanCapability,
-            cancellationToken).ConfigureAwait(false);
+        if (_journal.FailureReason is { } journalFailure)
+        {
+            BlockService(ServiceIds.Power, journalFailure);
+            BlockService(ServiceIds.Fans, journalFailure);
+            BlockService(ServiceIds.Controller, journalFailure);
+        }
+        else
+        {
+            await ReconcileOutstandingAsync(
+                _journal.OutstandingEntries,
+                identity,
+                powerCapability,
+                fanCapability,
+                cancellationToken).ConfigureAwait(false);
+        }
 
-        await context.Host.PublishDescriptorsAsync(_registry.DescriptorSet, cancellationToken)
+        await context.Host.PublishDescriptorsAsync(_descriptorSet!, cancellationToken)
             .ConfigureAwait(false);
         await context.Host.PublishOemControlsAsync(CreateOemControls(), cancellationToken)
             .ConfigureAwait(false);
 
         try
         {
-            await _coordinator.ActivateAsync(
-                new PluginResourceOperationContext(
-                    context.HostGeneration,
-                    context.DeviceGeneration,
+            await StartServicesAsync(
+                new ClawCycleContext(
+                    context.CycleGeneration,
                     DateTimeOffset.UtcNow.AddSeconds(15)),
                 cancellationToken).ConfigureAwait(false);
             _active = true;
             await PublishCapabilityStatesAsync(cancellationToken).ConfigureAwait(false);
+            return CurrentStartResult();
         }
         catch
         {
@@ -192,7 +188,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(command);
-        if (!_active || _registry is null || _quiescing)
+        if (!_active || _descriptorSet is null || _quiescing)
         {
             return Rejected(
                 command,
@@ -214,8 +210,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
 
         try
         {
-            CapabilityRegistry? registry = _registry;
-            if (!_active || registry is null || _quiescing)
+            if (!_active || _descriptorSet is null || _quiescing)
             {
                 return Rejected(
                     command,
@@ -223,20 +218,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                     "The Claw device cycle started quiescing before this command could run.");
             }
 
-            lock (_commandGate)
-            {
-                if (_idempotency.TryGetValue(command.IdempotencyKey, out CapabilityCommandResult? cached))
-                {
-                    return cached with { CommandId = command.CommandId };
-                }
-            }
-
-            CapabilityCommandResult result = await registry.ExecuteAsync(command, cancellationToken)
+            CapabilityCommandResult result = await ExecuteBoundCommandAsync(command, cancellationToken)
                 .ConfigureAwait(false);
-            if (result.Outcome is not CommandOutcome.Accepted)
-            {
-                Remember(command.IdempotencyKey, result);
-            }
 
             if (_host is not null && result.Outcome is CommandOutcome.AppliedVerified)
             {
@@ -258,7 +241,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
-        if (_coordinator is null)
+        if (_serviceStatuses.Count == 0)
         {
             return;
         }
@@ -267,7 +250,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         await _commandSerializer.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await _coordinator.SuspendAsync(
+            await SuspendServicesAsync(
                 OperationContext(context.Deadline),
                 cancellationToken).ConfigureAwait(false);
         }
@@ -278,21 +261,36 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     }
 
     /// <inheritdoc />
-    public async ValueTask ResumeAsync(
+    public async ValueTask<PluginStartResult> ResumeAsync(
         PluginResumeContext context,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
-        if (_coordinator is null)
+        if (_serviceStatuses.Count == 0)
         {
-            return;
+            return new PluginStartResult
+            {
+                State = PluginOperationalState.Passive,
+                Reason = new CapabilityReason(
+                    CapabilityReasonCode.ResourceReleased,
+                    "The Claw services have not been started."),
+            };
         }
 
         await _commandSerializer.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            _deviceGeneration = context.DeviceGeneration;
-            await _coordinator.ResumeAsync(
+            _cycleGeneration = context.CycleGeneration;
+            if (_journal is not null
+                && await _journal.CheckHealthAsync(cancellationToken).ConfigureAwait(false)
+                    is { } journalFailure)
+            {
+                BlockService(ServiceIds.Power, journalFailure);
+                BlockService(ServiceIds.Fans, journalFailure);
+                BlockService(ServiceIds.Controller, journalFailure);
+            }
+
+            await ResumeServicesAsync(
                 OperationContext(context.Deadline),
                 cancellationToken).ConfigureAwait(false);
             if (_host is null || _powerCapability is null || _fanCapability is null
@@ -301,14 +299,12 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 throw new InvalidOperationException("Resume cannot rebuild the capability surface.");
             }
 
-            _registry = BuildRegistry(
-                _powerCapability,
-                _fanCapability,
-                _lightingCapability);
-            await _host.PublishDescriptorsAsync(_registry.DescriptorSet, cancellationToken)
+            BuildCapabilitySurface();
+            await _host.PublishDescriptorsAsync(_descriptorSet!, cancellationToken)
                 .ConfigureAwait(false);
             _quiescing = false;
             await PublishCapabilityStatesAsync(cancellationToken).ConfigureAwait(false);
+            return CurrentStartResult();
         }
         finally
         {
@@ -325,6 +321,23 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         return _controller is null || _quiescing
             ? ValueTask.CompletedTask
             : _controller.ApplyHapticsAsync(frame, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public ValueTask<PluginDiagnostics> GetDiagnosticsAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var values = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["cycle"] = _active ? "started" : "stopped",
+            ["recovery"] = _journal?.FailureReason is null ? "healthy" : "blocked",
+        };
+        foreach (ClawServiceStatus service in _serviceStatuses)
+        {
+            values[service.ServiceId] = service.State.ToString();
+        }
+
+        return ValueTask.FromResult(new PluginDiagnostics { Values = values });
     }
 
     /// <inheritdoc />
@@ -359,17 +372,14 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             }
 
             _controller.Enabled = context.Enabled;
-            _deviceGeneration = context.DeviceGeneration;
+            _cycleGeneration = context.CycleGeneration;
             if (context.Enabled)
             {
-                PluginResourceOperationResult result = await _controller.AcquireAsync(
+                ClawServiceResult result = await _controller.AcquireAsync(
                     OperationContext(context.Deadline),
                     cancellationToken).ConfigureAwait(false);
-                await PublishResourceStateAsync(
-                    _controller,
-                    result.State,
-                    cancellationToken,
-                    result.Reason).ConfigureAwait(false);
+                await ApplyServiceLifecycleStateAsync(_controller, result, cancellationToken)
+                    .ConfigureAwait(false);
             }
             else
             {
@@ -402,11 +412,13 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         ControllerHandoffResult result = await _controller.ReleaseControllerAsync(
             context.Deadline,
             cancellationToken).ConfigureAwait(false);
-        await PublishResourceStateAsync(
+        await ApplyServiceLifecycleStateAsync(
             _controller,
-            result is ControllerHandoffResult.ReleasedVerified
-                ? ResourceState.Idle
-                : ResourceState.ReleasedUnverified,
+            new ClawServiceResult(
+                result is ControllerHandoffResult.ReleasedVerified
+                    ? ClawServiceState.Idle
+                    : ClawServiceState.ReleasedUnverified,
+                _controller.Reason),
             cancellationToken).ConfigureAwait(false);
         return new PluginControllerRelease
         {
@@ -419,8 +431,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     }
 
     /// <inheritdoc />
-    public async ValueTask DeactivateAsync(
-        PluginDeactivationContext context,
+    public async ValueTask<PluginStopResult> StopAsync(
+        PluginStopContext context,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -428,15 +440,23 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         await _commandSerializer.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_coordinator is not null)
+            if (_serviceStatuses.Count > 0)
             {
-                await _coordinator.ReleaseAsync(OperationContext(context.Deadline), cancellationToken)
+                await StopServicesAsync(OperationContext(context.Deadline), cancellationToken)
                     .ConfigureAwait(false);
             }
 
+            PluginStopResult result = CurrentStopResult();
             _active = false;
-            _registry = null;
-            _coordinator = null;
+            _descriptorSet = null;
+            _serviceStatuses = [];
+            if (_journal is not null)
+            {
+                await _journal.DisposeAsync().ConfigureAwait(false);
+                _journal = null;
+            }
+
+            return result;
         }
         finally
         {
@@ -455,9 +475,9 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         _disposed = true;
         if (_active)
         {
-            await DeactivateAsync(
-                new PluginDeactivationContext(
-                    PluginDeactivationReason.WsgmExiting,
+            await StopAsync(
+                new PluginStopContext(
+                    PluginStopReason.WsgmExiting,
                     DateTimeOffset.UtcNow.AddSeconds(12)),
                 CancellationToken.None).ConfigureAwait(false);
         }
@@ -468,387 +488,853 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         await _services.Mcu.DisposeAsync().ConfigureAwait(false);
         await _services.OemEvents.DisposeAsync().ConfigureAwait(false);
         await _services.Wmi.DisposeAsync().ConfigureAwait(false);
+        if (_journal is not null)
+        {
+            await _journal.DisposeAsync().ConfigureAwait(false);
+            _journal = null;
+        }
+
         _commandSerializer.Dispose();
     }
 
-    private CapabilityRegistry BuildRegistry(
-        ClawA2VmPowerCapability powerCapability,
-        ClawA2VmFanCapability fanCapability,
-        ClawA2VmLightingCapability lightingCapability)
+    private async ValueTask StartServicesAsync(
+        ClawCycleContext context,
+        CancellationToken cancellationToken)
+    {
+        RequireServices();
+        try
+        {
+            await StartOneAsync(_oem!, () => _oem!.AcquireAsync(context, cancellationToken), cancellationToken)
+                .ConfigureAwait(false);
+            await StartOneAsync(_power!, () => _power!.AcquireAsync(context, cancellationToken), cancellationToken)
+                .ConfigureAwait(false);
+            await StartOneAsync(_fans!, () => _fans!.AcquireAsync(context, cancellationToken), cancellationToken)
+                .ConfigureAwait(false);
+            await StartOneAsync(
+                _telemetry!,
+                () => _telemetry!.AcquireAsync(context, cancellationToken),
+                cancellationToken).ConfigureAwait(false);
+            await StartOneAsync(
+                _lighting!,
+                () => _lighting!.AcquireAsync(context, cancellationToken),
+                cancellationToken).ConfigureAwait(false);
+            await StartOneAsync(_motion!, () => _motion!.AcquireAsync(context, cancellationToken), cancellationToken)
+                .ConfigureAwait(false);
+            await StartOneAsync(
+                _controller!,
+                () => _controller!.AcquireAsync(context, cancellationToken),
+                cancellationToken).ConfigureAwait(false);
+            await StartOneAsync(
+                _suppressor!,
+                () => _suppressor!.AcquireAsync(context, cancellationToken),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await StopServicesAsync(context, CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private async ValueTask SuspendServicesAsync(
+        ClawCycleContext context,
+        CancellationToken cancellationToken)
+    {
+        RequireServices();
+        await OperateOneAsync(_oem!, () => _oem!.SuspendAsync(context, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+        await OperateOneAsync(
+            _motion!,
+            () => _motion!.SuspendAsync(context, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+        await OperateOneAsync(
+            _controller!,
+            () => _controller!.SuspendAsync(context, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+        await OperateOneAsync(
+            _suppressor!,
+            () => _suppressor!.SuspendAsync(context, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask ResumeServicesAsync(
+        ClawCycleContext context,
+        CancellationToken cancellationToken)
+    {
+        RequireServices();
+        await StartOneAsync(_oem!, () => _oem!.ResumeAsync(context, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+        await StartOneAsync(_power!, () => _power!.AcquireAsync(context, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+        await StartOneAsync(_fans!, () => _fans!.AcquireAsync(context, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+        await StartOneAsync(
+            _telemetry!,
+            () => _telemetry!.AcquireAsync(context, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+        await StartOneAsync(
+            _lighting!,
+            () => _lighting!.AcquireAsync(context, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+        await StartOneAsync(_motion!, () => _motion!.ResumeAsync(context, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+        await StartOneAsync(
+            _controller!,
+            () => _controller!.ResumeAsync(context, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+        await StartOneAsync(
+            _suppressor!,
+            () => _suppressor!.ResumeAsync(context, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask StopServicesAsync(
+        ClawCycleContext context,
+        CancellationToken cancellationToken)
+    {
+        RequireServices();
+        await StopOneAsync(
+            _suppressor!,
+            () => _suppressor!.ReleaseAsync(context, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+        await StopOneAsync(
+            _controller!,
+            () => _controller!.ReleaseAsync(context, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+        await StopOneAsync(_motion!, () => _motion!.ReleaseAsync(context, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+        await StopOneAsync(
+            _lighting!,
+            () => _lighting!.ReleaseAsync(context, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+        await StopOneAsync(
+            _telemetry!,
+            () => _telemetry!.ReleaseAsync(context, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+        await StopOneAsync(_fans!, () => _fans!.ReleaseAsync(context, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+        await StopOneAsync(_power!, () => _power!.ReleaseAsync(context, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+        await StopOneAsync(_oem!, () => _oem!.ReleaseAsync(context, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async ValueTask StartOneAsync(
+        ClawServiceStatus service,
+        Func<ValueTask<ClawServiceResult>> operation,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ClawServiceResult result = await InvokeServiceAsync(service, operation, cancellationToken)
+            .ConfigureAwait(false);
+        service.ApplyResult(NormalizeAcquisitionResult(result));
+    }
+
+    private static async ValueTask OperateOneAsync(
+        ClawServiceStatus service,
+        Func<ValueTask<ClawServiceResult>> operation,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ClawServiceResult result = await InvokeServiceAsync(service, operation, cancellationToken)
+            .ConfigureAwait(false);
+        service.ApplyResult(result);
+    }
+
+    private static async ValueTask StopOneAsync(
+        ClawServiceStatus service,
+        Func<ValueTask<ClawServiceResult>> operation,
+        CancellationToken cancellationToken)
+    {
+        ClawServiceResult result;
+        try
+        {
+            result = await InvokeServiceAsync(service, operation, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            result = new ClawServiceResult(
+                ClawServiceState.ReleasedUnverified,
+                new CapabilityReason(
+                    CapabilityReasonCode.Quiescing,
+                    $"Release of service '{service.ServiceId}' exceeded its deadline."));
+        }
+
+        service.ApplyResult(NormalizeReleaseResult(result));
+    }
+
+    private static async ValueTask<ClawServiceResult> InvokeServiceAsync(
+        ClawServiceStatus service,
+        Func<ValueTask<ClawServiceResult>> operation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await operation().ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return new ClawServiceResult(
+                ClawServiceState.Faulted,
+                new CapabilityReason(
+                    CapabilityReasonCode.TransportFaulted,
+                    $"Service '{service.ServiceId}' operation failed: {ex.GetType().Name}."));
+        }
+    }
+
+    private static ValueTask ApplyServiceLifecycleStateAsync(
+        ClawServiceStatus service,
+        ClawServiceResult result,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (result.State is not ClawServiceState.Acquiring and not ClawServiceState.Releasing)
+        {
+            service.ApplyResult(result);
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
+    private void RequireServices()
+    {
+        if (_oem is null || _power is null || _fans is null || _telemetry is null
+            || _lighting is null || _motion is null || _controller is null || _suppressor is null)
+        {
+            throw new InvalidOperationException("Claw services have not been created.");
+        }
+    }
+
+    private static ClawServiceResult NormalizeAcquisitionResult(
+        ClawServiceResult result) => result.State switch
+        {
+            ClawServiceState.Owned or ClawServiceState.Passive or ClawServiceState.Degraded
+                or ClawServiceState.Faulted => result,
+            _ => new ClawServiceResult(
+                ClawServiceState.Faulted,
+                new CapabilityReason(
+                    CapabilityReasonCode.TransportFaulted,
+                    $"Acquisition returned invalid state {result.State}.")),
+        };
+
+    private static ClawServiceResult NormalizeReleaseResult(
+        ClawServiceResult result) => result.State switch
+        {
+            ClawServiceState.Idle or ClawServiceState.ReleasedUnverified or ClawServiceState.Faulted => result,
+            _ => new ClawServiceResult(
+                ClawServiceState.ReleasedUnverified,
+                new CapabilityReason(
+                    CapabilityReasonCode.TransportFaulted,
+                    $"Release returned invalid state {result.State}.")),
+        };
+
+    private void BuildCapabilitySurface()
     {
         if (_power is null || _fans is null || _telemetry is null || _lighting is null
             || _motion is null || _controller is null)
         {
-            throw new InvalidOperationException("Resources must exist before descriptors are built.");
+            throw new InvalidOperationException("Services must exist before descriptors are built.");
         }
 
-        IReadOnlyList<CapabilityRegistration> registrations =
+        IReadOnlyList<CapabilityDescriptor> descriptors =
         [
-            Register(
-                ResourceIds.Power,
-                IntegerDescriptor(CapabilityIds.PowerSustained, CapabilityRole.PowerSustainedLimit,
-                    DisplayKey.SustainedPowerLimit, 8, 30, CapabilityUnit.Watt, writable: true),
-                _power,
-                async token => Integer((await powerCapability.ReadAsync(token).ConfigureAwait(false)).SustainedWatts),
-                (execution, token) => JournalCommandAsync(
-                    ResourceIds.Power,
-                    ClawFirmwareIdentities.Wmi,
-                    execution,
-                    async commandToken => ClawRecoveryValues.Power(
-                        await powerCapability.ReadAsync(commandToken).ConfigureAwait(false)),
-                    (commandExecution, commandToken) => powerCapability.ApplySustainedAsync(
-                        commandExecution.Command,
-                        commandExecution.Command.RequestedValue!.IntegerValue!.Value,
-                        commandToken),
-                    token)),
-            Register(
-                ResourceIds.Power,
-                IntegerDescriptor(CapabilityIds.PowerBoost, CapabilityRole.PowerSlowLimit,
-                    DisplayKey.BoostPowerLimit, 8, 37, CapabilityUnit.Watt, writable: true),
-                _power,
-                async token => Integer((await powerCapability.ReadAsync(token).ConfigureAwait(false)).BoostWatts),
-                (execution, token) => JournalCommandAsync(
-                    ResourceIds.Power,
-                    ClawFirmwareIdentities.Wmi,
-                    execution,
-                    async commandToken => ClawRecoveryValues.Power(
-                        await powerCapability.ReadAsync(commandToken).ConfigureAwait(false)),
-                    (commandExecution, commandToken) => powerCapability.ApplyBoostAsync(
-                        commandExecution.Command,
-                        commandExecution.Command.RequestedValue!.IntegerValue!.Value,
-                        commandToken),
-                    token)),
-            Register(
-                ResourceIds.Power,
-                ChoiceDescriptor(
-                    CapabilityIds.Scenario,
-                    CapabilityRole.ScenarioMode,
-                    DisplayKey.PerformanceProfile,
-                    ["comfort", "green", "eco", "user", "sport"],
-                    writable: false),
-                _power,
-                async token => Scenario((await powerCapability.ReadAsync(token).ConfigureAwait(false)).Scenario),
-                ReadOnlyHandler),
-            Register(
-                ResourceIds.Fans,
-                ChoiceDescriptor(
-                    CapabilityIds.FanMode,
-                    CapabilityRole.FanMode,
-                    DisplayKey.FanMode,
-                    ["automatic", "custom", "full-speed"],
-                    writable: true),
-                _fans,
-                async token => FanMode(await fanCapability.ReadSnapshotAsync(token).ConfigureAwait(false)),
-                (execution, token) => JournalCommandAsync(
-                    ResourceIds.Fans,
-                    ClawFirmwareIdentities.Wmi,
-                    execution,
-                    async commandToken => ClawRecoveryValues.Fans(
-                        await fanCapability.ReadSnapshotAsync(commandToken).ConfigureAwait(false)),
-                    (commandExecution, commandToken) => fanCapability.ApplyModeAsync(
-                        commandExecution.Command,
-                        commandExecution.Command.RequestedValue!.ChoiceValue!,
-                        commandToken),
-                    token)),
-            RegisterFanCurve(CapabilityInstances.Left, fanCapability),
-            RegisterFanCurve(CapabilityInstances.Right, fanCapability),
-            Register(
-                ResourceIds.Telemetry,
-                IntegerDescriptor(CapabilityIds.FanRpm, CapabilityRole.FanMeasuredRpm,
-                    DisplayKey.FanLeft, 0, 10_000, CapabilityUnit.Rpm, writable: false,
-                    CapabilityInstances.Left),
-                _telemetry,
-                async token => Integer((await fanCapability.ReadTelemetryAsync(token).ConfigureAwait(false)).LeftRpm),
-                ReadOnlyHandler),
-            Register(
-                ResourceIds.Telemetry,
-                IntegerDescriptor(CapabilityIds.FanRpm, CapabilityRole.FanMeasuredRpm,
-                    DisplayKey.FanRight, 0, 10_000, CapabilityUnit.Rpm, writable: false,
-                    CapabilityInstances.Right),
-                _telemetry,
-                async token => Integer((await fanCapability.ReadTelemetryAsync(token).ConfigureAwait(false)).RightRpm),
-                ReadOnlyHandler),
-            Register(
-                ResourceIds.Telemetry,
-                IntegerDescriptor(CapabilityIds.Temperature, CapabilityRole.Telemetry,
-                    DisplayKey.CpuTemperature, 0, 110, CapabilityUnit.Celsius, writable: false),
-                _telemetry,
-                async token => Integer((await fanCapability.ReadTelemetryAsync(token).ConfigureAwait(false)).TemperatureCelsius),
-                ReadOnlyHandler),
-            RegisterLightingBrightness(lightingCapability),
-            RegisterLightingColor(CapabilityInstances.RightRing, "Right ring", lightingCapability),
-            RegisterLightingColor(CapabilityInstances.LeftRing, "Left ring", lightingCapability),
-            RegisterLightingColor(CapabilityInstances.Buttons, "Buttons", lightingCapability),
-            Register(
-                ResourceIds.Controller,
-                BooleanDescriptor(CapabilityIds.Controller, CapabilityRole.ControllerSource,
-                    DisplayKey.Controller, writable: false),
-                _controller,
-                _ => ValueTask.FromResult<CapabilityValue?>(
-                    Boolean(_controller.State is ResourceState.Owned)),
-                ReadOnlyHandler,
-                firmwareKind: FirmwareKind.Mcu),
-            Register(
-                ResourceIds.Motion,
-                BooleanDescriptor(CapabilityIds.Motion, CapabilityRole.MotionSource,
-                    DisplayKey.Motion, writable: false),
-                _motion,
-                _ => ValueTask.FromResult<CapabilityValue?>(
-                    Boolean(_motion.State is ResourceState.Owned)),
-                ReadOnlyHandler,
-                firmwareKind: FirmwareKind.None),
-            Register(
-                ResourceIds.Controller,
-                BooleanDescriptor(CapabilityIds.Rumble, CapabilityRole.HapticSink,
-                    DisplayKey.Rumble, writable: false),
-                _controller,
-                _ => ValueTask.FromResult<CapabilityValue?>(
-                    Boolean(_controller.State is ResourceState.Owned)),
-                ReadOnlyHandler,
-                firmwareKind: FirmwareKind.Mcu),
-        ];
-
-        return new CapabilityRegistry(1, _deviceGeneration, registrations);
-    }
-
-    private CapabilityRegistration RegisterFanCurve(
-        string instance,
-        ClawA2VmFanCapability capability)
-    {
-        FanResource resource = _fans!;
-        int channel = instance == CapabilityInstances.Left ? 1 : 2;
-        CapabilityDescriptor descriptor = new()
-        {
-            CapabilityId = CapabilityIds.FanCurve,
-            InstanceId = instance,
-            Role = CapabilityRole.FanCurve,
-            ValueKind = CapabilityValueKind.Curve,
-            Display = new CapabilityDisplay
-            {
-                Key = instance == CapabilityInstances.Left ? DisplayKey.FanLeft : DisplayKey.FanRight,
-            },
-            SupportsRead = true,
-            SupportsWrite = true,
-            Persistence = CapabilityPersistence.Volatile,
-        };
-        return Register(
-            ResourceIds.Fans,
-            descriptor,
-            resource,
-            async token =>
-            {
-                FanSnapshot snapshot = await capability.ReadSnapshotAsync(token).ConfigureAwait(false);
-                return Curve(channel == 1 ? snapshot.Left : snapshot.Right);
-            },
-            (execution, token) => JournalCommandAsync(
-                ResourceIds.Fans,
-                ClawFirmwareIdentities.Wmi,
-                execution,
-                async commandToken => ClawRecoveryValues.Fans(
-                    await capability.ReadSnapshotAsync(commandToken).ConfigureAwait(false)),
-                (commandExecution, commandToken) => capability.ApplyCurveAsync(
-                    commandExecution.Command,
-                    channel,
-                    commandExecution.Command.RequestedValue!.CurveValue,
-                    commandToken),
-                token));
-    }
-
-    private CapabilityRegistration RegisterLightingBrightness(ClawA2VmLightingCapability capability) =>
-        Register(
-            ResourceIds.Lighting,
+            IntegerDescriptor(CapabilityIds.PowerSustained, CapabilityRole.PowerSustainedLimit,
+                DisplayKey.SustainedPowerLimit, 8, 30, CapabilityUnit.Watt, writable: true),
+            IntegerDescriptor(CapabilityIds.PowerBoost, CapabilityRole.PowerSlowLimit,
+                DisplayKey.BoostPowerLimit, 8, 37, CapabilityUnit.Watt, writable: true),
+            ChoiceDescriptor(
+                CapabilityIds.Scenario,
+                CapabilityRole.ScenarioMode,
+                DisplayKey.PerformanceProfile,
+                ["comfort", "green", "eco", "user", "sport"],
+                writable: false),
+            ChoiceDescriptor(
+                CapabilityIds.FanMode,
+                CapabilityRole.FanMode,
+                DisplayKey.FanMode,
+                ["automatic", "custom", "full-speed"],
+                writable: true),
+            FanCurveDescriptor(CapabilityInstances.Left),
+            FanCurveDescriptor(CapabilityInstances.Right),
+            IntegerDescriptor(CapabilityIds.FanRpm, CapabilityRole.FanMeasuredRpm,
+                DisplayKey.FanLeft, 0, 10_000, CapabilityUnit.Rpm, writable: false,
+                CapabilityInstances.Left),
+            IntegerDescriptor(CapabilityIds.FanRpm, CapabilityRole.FanMeasuredRpm,
+                DisplayKey.FanRight, 0, 10_000, CapabilityUnit.Rpm, writable: false,
+                CapabilityInstances.Right),
+            IntegerDescriptor(CapabilityIds.Temperature, CapabilityRole.Telemetry,
+                DisplayKey.CpuTemperature, 0, 110, CapabilityUnit.Celsius, writable: false),
             IntegerDescriptor(CapabilityIds.LightingBrightness, CapabilityRole.LightingBrightness,
                 DisplayKey.Brightness, 0, 100, CapabilityUnit.Percent, writable: true,
                 persistence: CapabilityPersistence.DevicePersistent),
-            _lighting!,
-            async token => Integer((await capability.ReadAsync(token).ConfigureAwait(false)).Brightness),
-            (execution, token) => capability.ApplyAsync(
-                execution.Command,
+            LightingColorDescriptor(CapabilityInstances.RightRing, "Right ring"),
+            LightingColorDescriptor(CapabilityInstances.LeftRing, "Left ring"),
+            LightingColorDescriptor(CapabilityInstances.Buttons, "Buttons"),
+            BooleanDescriptor(CapabilityIds.Controller, CapabilityRole.ControllerSource,
+                DisplayKey.Controller, writable: false),
+            BooleanDescriptor(CapabilityIds.Motion, CapabilityRole.MotionSource,
+                DisplayKey.Motion, writable: false),
+            BooleanDescriptor(CapabilityIds.Rumble, CapabilityRole.HapticSink,
+                DisplayKey.Rumble, writable: false),
+        ];
+
+        EnsureUniqueCapabilityKeys(descriptors);
+        _descriptorSet = new CapabilityDescriptorSet
+        {
+            Generation = 1,
+            CycleGeneration = _cycleGeneration,
+            Descriptors = descriptors,
+        };
+    }
+
+    private async ValueTask<CapabilityCommandResult> ExecuteBoundCommandAsync(
+        CapabilityCommand command,
+        CancellationToken cancellationToken)
+    {
+        CapabilityDescriptor? descriptor = _descriptorSet?.Descriptors.FirstOrDefault(candidate =>
+            string.Equals(candidate.CapabilityId, command.CapabilityId, StringComparison.Ordinal)
+            && string.Equals(candidate.InstanceId, command.InstanceId, StringComparison.Ordinal));
+        ClawServiceStatus? service = ServiceForCapability(command.CapabilityId);
+        if (descriptor is null || service is null)
+        {
+            return Rejected(
+                command,
+                CapabilityReasonCode.Unsupported,
+                $"Capability '{CapabilityKey(command.CapabilityId, command.InstanceId)}' is not available.");
+        }
+
+        ClawIdentityState identity;
+        try
+        {
+            identity = await _services.Identity.ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (service.State is ClawServiceState.Owned
+                && identity.ExactMachineMatch
+                && FirmwareVerified(identity, FirmwareForCapability(command.CapabilityId)))
+            {
+                await RefreshObservedAsync(command.CapabilityId, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return Rejected(
+                command,
+                CapabilityReasonCode.Quiescing,
+                "Command was cancelled before hardware application began.");
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return Rejected(
+                command,
+                CapabilityReasonCode.TransportFaulted,
+                $"Current-state revalidation failed: {ex.GetType().Name}.");
+        }
+
+        CapabilityReason? refusal = RefusalFor(
+            service,
+            FirmwareForCapability(command.CapabilityId),
+            identity);
+        refusal ??= ValidateCommand(command, descriptor, identity.OnAcPower);
+        if (refusal is not null)
+        {
+            return Rejected(command, refusal);
+        }
+
+        CapabilityCommandResult result;
+        try
+        {
+            result = await ApplyCapabilityCommandAsync(command, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return Indeterminate(
+                command,
+                "Command was cancelled after hardware application began.");
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return Indeterminate(
+                command,
+                $"Capability handler failed after admission: {ex.GetType().Name}.");
+        }
+
+        return NormalizeCommandResult(command, result);
+    }
+
+    private ValueTask<CapabilityCommandResult> ApplyCapabilityCommandAsync(
+        CapabilityCommand command,
+        CancellationToken cancellationToken)
+    {
+        ClawA2VmPowerCapability power = _powerCapability
+            ?? throw new InvalidOperationException("The power capability is unavailable.");
+        ClawA2VmFanCapability fans = _fanCapability
+            ?? throw new InvalidOperationException("The fan capability is unavailable.");
+        ClawA2VmLightingCapability lighting = _lightingCapability
+            ?? throw new InvalidOperationException("The lighting capability is unavailable.");
+
+        return command.CapabilityId switch
+        {
+            CapabilityIds.PowerSustained => JournalCommandAsync(
+                ServiceIds.Power,
+                ClawFirmwareIdentities.Wmi,
+                command,
+                async token => ClawRecoveryValues.Power(
+                    await power.ReadAsync(token).ConfigureAwait(false)),
+                (journalCommand, token) => power.ApplySustainedAsync(
+                    journalCommand,
+                    journalCommand.RequestedValue!.IntegerValue!.Value,
+                    token),
+                cancellationToken),
+            CapabilityIds.PowerBoost => JournalCommandAsync(
+                ServiceIds.Power,
+                ClawFirmwareIdentities.Wmi,
+                command,
+                async token => ClawRecoveryValues.Power(
+                    await power.ReadAsync(token).ConfigureAwait(false)),
+                (journalCommand, token) => power.ApplyBoostAsync(
+                    journalCommand,
+                    journalCommand.RequestedValue!.IntegerValue!.Value,
+                    token),
+                cancellationToken),
+            CapabilityIds.FanMode => JournalCommandAsync(
+                ServiceIds.Fans,
+                ClawFirmwareIdentities.Wmi,
+                command,
+                async token => ClawRecoveryValues.Fans(
+                    await fans.ReadSnapshotAsync(token).ConfigureAwait(false)),
+                (journalCommand, token) => fans.ApplyModeAsync(
+                    journalCommand,
+                    journalCommand.RequestedValue!.ChoiceValue!,
+                    token),
+                cancellationToken),
+            CapabilityIds.FanCurve => ApplyFanCurveCommandAsync(command, fans, cancellationToken),
+            CapabilityIds.LightingBrightness => lighting.ApplyAsync(
+                command,
                 state => state with
                 {
-                    Brightness = execution.Command.RequestedValue!.IntegerValue!.Value,
+                    Brightness = command.RequestedValue!.IntegerValue!.Value,
                 },
-                token),
-            firmwareKind: FirmwareKind.Mcu);
-
-    private CapabilityRegistration RegisterLightingColor(
-        string instance,
-        string label,
-        ClawA2VmLightingCapability capability)
-    {
-        CapabilityDescriptor descriptor = new()
-        {
-            CapabilityId = CapabilityIds.LightingColor,
-            InstanceId = instance,
-            Role = CapabilityRole.LightingZoneColor,
-            ValueKind = CapabilityValueKind.Color,
-            Display = new CapabilityDisplay { Key = DisplayKey.Custom, CustomLabel = label },
-            SupportsRead = true,
-            SupportsWrite = true,
-            Persistence = CapabilityPersistence.DevicePersistent,
-        };
-        return Register(
-            ResourceIds.Lighting,
-            descriptor,
-            _lighting!,
-            async token =>
-            {
-                LightingState state = await capability.ReadAsync(token).ConfigureAwait(false);
-                return Color(instance switch
-                {
-                    CapabilityInstances.RightRing => state.RightRingColor,
-                    CapabilityInstances.LeftRing => state.LeftRingColor,
-                    CapabilityInstances.Buttons => state.ButtonsColor,
-                    _ => throw new InvalidOperationException("Unknown lighting zone."),
-                });
-            },
-            (execution, token) => capability.ApplyAsync(
-                execution.Command,
-                state => instance switch
+                cancellationToken),
+            CapabilityIds.LightingColor => lighting.ApplyAsync(
+                command,
+                state => command.InstanceId switch
                 {
                     CapabilityInstances.RightRing => state with
                     {
-                        RightRingColor = execution.Command.RequestedValue!.ColorValue!.Value,
+                        RightRingColor = command.RequestedValue!.ColorValue!.Value,
                     },
                     CapabilityInstances.LeftRing => state with
                     {
-                        LeftRingColor = execution.Command.RequestedValue!.ColorValue!.Value,
+                        LeftRingColor = command.RequestedValue!.ColorValue!.Value,
                     },
                     CapabilityInstances.Buttons => state with
                     {
-                        ButtonsColor = execution.Command.RequestedValue!.ColorValue!.Value,
+                        ButtonsColor = command.RequestedValue!.ColorValue!.Value,
                     },
                     _ => state,
                 },
-                token),
-            firmwareKind: FirmwareKind.Mcu);
+                cancellationToken),
+            _ => ReadOnlyHandler(command, cancellationToken),
+        };
     }
 
-    private CapabilityRegistration Register(
-        string resourceId,
+    private ValueTask<CapabilityCommandResult> ApplyFanCurveCommandAsync(
+        CapabilityCommand command,
+        ClawA2VmFanCapability fans,
+        CancellationToken cancellationToken)
+    {
+        int channel = command.InstanceId == CapabilityInstances.Left ? 1 : 2;
+        return JournalCommandAsync(
+            ServiceIds.Fans,
+            ClawFirmwareIdentities.Wmi,
+            command,
+            async token => ClawRecoveryValues.Fans(
+                await fans.ReadSnapshotAsync(token).ConfigureAwait(false)),
+            (journalCommand, token) => fans.ApplyCurveAsync(
+                journalCommand,
+                channel,
+                journalCommand.RequestedValue!.CurveValue,
+                token),
+            cancellationToken);
+    }
+
+    private ClawServiceStatus? ServiceForCapability(string capabilityId) => capabilityId switch
+    {
+        CapabilityIds.PowerSustained or CapabilityIds.PowerBoost or CapabilityIds.Scenario => _power,
+        CapabilityIds.FanMode or CapabilityIds.FanCurve => _fans,
+        CapabilityIds.FanRpm or CapabilityIds.Temperature => _telemetry,
+        CapabilityIds.LightingBrightness or CapabilityIds.LightingColor => _lighting,
+        CapabilityIds.Controller or CapabilityIds.Rumble => _controller,
+        CapabilityIds.Motion => _motion,
+        _ => null,
+    };
+
+    private static FirmwareKind FirmwareForCapability(string capabilityId) => capabilityId switch
+    {
+        CapabilityIds.LightingBrightness or CapabilityIds.LightingColor
+            or CapabilityIds.Controller or CapabilityIds.Rumble => FirmwareKind.Mcu,
+        CapabilityIds.Motion => FirmwareKind.None,
+        _ => FirmwareKind.Wmi,
+    };
+
+    private static CapabilityReason? RefusalFor(
+        ClawServiceStatus service,
+        FirmwareKind firmwareKind,
+        ClawIdentityState identity)
+    {
+        if (!identity.ExactMachineMatch)
+        {
+            return new CapabilityReason(
+                CapabilityReasonCode.GenerationChanged,
+                "Exact device identity no longer matches the Claw implementation.",
+                Retryable: true);
+        }
+
+        if (!FirmwareVerified(identity, firmwareKind))
+        {
+            return new CapabilityReason(
+                CapabilityReasonCode.FirmwareNotVerified,
+                "Current firmware is outside the Claw implementation's verified gate.");
+        }
+
+        return service.State switch
+        {
+            ClawServiceState.Owned => null,
+            ClawServiceState.Passive => new CapabilityReason(
+                CapabilityReasonCode.ResourceConflict,
+                "The device service is passive or held by another owner.", Retryable: true),
+            ClawServiceState.Releasing => new CapabilityReason(
+                CapabilityReasonCode.Quiescing,
+                "The device service is being released."),
+            ClawServiceState.Degraded => new CapabilityReason(
+                CapabilityReasonCode.TransportFaulted,
+                "The device service is degraded and cannot accept commands."),
+            ClawServiceState.Faulted or ClawServiceState.ReleasedUnverified => new CapabilityReason(
+                CapabilityReasonCode.TransportFaulted,
+                "The device service is faulted or its release could not be verified."),
+            _ => new CapabilityReason(
+                CapabilityReasonCode.ResourceReleased,
+                "The plugin does not currently own this device service.", Retryable: true),
+        };
+    }
+
+    private CapabilityReason? ValidateCommand(
+        CapabilityCommand command,
         CapabilityDescriptor descriptor,
-        ClawResourceBase resource,
-        Func<CancellationToken, ValueTask<CapabilityValue?>> readCurrent,
-        PluginCommandHandler handler,
-        FirmwareKind firmwareKind = FirmwareKind.Wmi) =>
-        new(
-            resourceId,
-            descriptor,
-            async token =>
-            {
-                ClawIdentityState identity = await _services.Identity.ReadAsync(token).ConfigureAwait(false);
-                CapabilityValue? current = resource.State is ResourceState.Owned
-                    && identity.ExactMachineMatch
-                    && (firmwareKind switch
-                    {
-                        FirmwareKind.Wmi => identity.WmiFirmwareVerified,
-                        FirmwareKind.Mcu => identity.McuFirmwareVerified,
-                        _ => true,
-                    })
-                    ? await readCurrent(token).ConfigureAwait(false)
-                    : null;
-                return new PluginCommandSnapshot
+        bool onAcPower)
+    {
+        if (_descriptorSet is null
+            || command.ExpectedDescriptorGeneration != _descriptorSet.Generation
+            || command.ExpectedCycleGeneration != _cycleGeneration)
+        {
+            return new CapabilityReason(
+                CapabilityReasonCode.GenerationChanged,
+                "Command targets a descriptor or device generation that is no longer current.",
+                Retryable: true);
+        }
+
+        if (command.Deadline <= DateTimeOffset.UtcNow)
+        {
+            return new CapabilityReason(
+                CapabilityReasonCode.Quiescing,
+                "Command deadline passed before it could be applied.",
+                Retryable: true);
+        }
+
+        if (onAcPower ? !descriptor.AvailableOnAc : !descriptor.AvailableOnDc)
+        {
+            return new CapabilityReason(
+                CapabilityReasonCode.UnavailableOnPowerSource,
+                onAcPower
+                    ? "Capability is unavailable on AC power."
+                    : "Capability is unavailable on battery power.");
+        }
+
+        if (command.RequestedValue is null)
+        {
+            return descriptor.SupportsAction
+                ? null
+                : new CapabilityReason(
+                    CapabilityReasonCode.Unsupported,
+                    "Capability does not support being invoked as an action.");
+        }
+
+        if (!descriptor.SupportsWrite)
+        {
+            return new CapabilityReason(CapabilityReasonCode.Unsupported, "Capability is read-only.");
+        }
+
+        CapabilityValue value = command.RequestedValue;
+        if (value.Kind != descriptor.ValueKind)
+        {
+            return new CapabilityReason(
+                CapabilityReasonCode.Unsupported,
+                $"Value kind {value.Kind} does not match descriptor kind {descriptor.ValueKind}.");
+        }
+
+        return ValidateCommandValue(value, descriptor);
+    }
+
+    private static CapabilityReason? ValidateCommandValue(
+        CapabilityValue value,
+        CapabilityDescriptor descriptor)
+    {
+        switch (descriptor.ValueKind)
+        {
+            case CapabilityValueKind.Integer:
+                if (value.IntegerValue is not { } integer)
                 {
-                    IdentityVerified = identity.ExactMachineMatch,
-                    FirmwareVerified = firmwareKind switch
+                    return ValueOutOfRange("No integer value was supplied.");
+                }
+
+                if (descriptor.Minimum is { } minimum && integer < minimum)
+                {
+                    return ValueOutOfRange($"{integer} is below the minimum of {minimum}.");
+                }
+
+                if (descriptor.Maximum is { } maximum && integer > maximum)
+                {
+                    return ValueOutOfRange($"{integer} is above the maximum of {maximum}.");
+                }
+
+                if (descriptor.Step is { } step and > 0)
+                {
+                    int origin = descriptor.Minimum ?? 0;
+                    if ((integer - origin) % step != 0)
                     {
-                        FirmwareKind.Wmi => identity.WmiFirmwareVerified,
-                        FirmwareKind.Mcu => identity.McuFirmwareVerified,
-                        _ => true,
-                    },
-                    ResourceState = resource.State,
-                    DescriptorGeneration = _registry?.DescriptorSet.Generation ?? 1,
-                    DeviceGeneration = _deviceGeneration,
-                    OnAcPower = identity.OnAcPower,
-                    CurrentValue = current,
-                };
-            },
-            handler);
+                        return ValueOutOfRange(
+                            $"{integer} is not on the {step} step boundary from {origin}.");
+                    }
+                }
+
+                return null;
+
+            case CapabilityValueKind.Choice:
+                if (value.ChoiceValue is not { Length: > 0 } choice)
+                {
+                    return ValueOutOfRange("No choice was supplied.");
+                }
+
+                return descriptor.Choices.Any(candidate => string.Equals(
+                    candidate.Value,
+                    choice,
+                    StringComparison.Ordinal))
+                    ? null
+                    : ValueOutOfRange($"'{choice}' is not one of the declared options.");
+
+            case CapabilityValueKind.Boolean:
+                return value.BooleanValue is not null
+                    ? null
+                    : ValueOutOfRange("No boolean value was supplied.");
+
+            case CapabilityValueKind.Color:
+                if (value.ColorValue is not { } color)
+                {
+                    return ValueOutOfRange("No colour was supplied.");
+                }
+
+                return color is >= 0 and <= 0xFFFFFF
+                    ? null
+                    : ValueOutOfRange("Colour must be 24-bit RGB.");
+
+            case CapabilityValueKind.Curve:
+                if (value.CurveValue.Count == 0)
+                {
+                    return ValueOutOfRange("Curve has no points.");
+                }
+
+                for (int index = 1; index < value.CurveValue.Count; index++)
+                {
+                    if (value.CurveValue[index].Input <= value.CurveValue[index - 1].Input)
+                    {
+                        return ValueOutOfRange(
+                            "Curve points must be strictly increasing in input.");
+                    }
+                }
+
+                return null;
+
+            default:
+                return new CapabilityReason(
+                    CapabilityReasonCode.Unsupported,
+                    $"Value kind {descriptor.ValueKind} carries no value.");
+        }
+    }
+
+    private static CapabilityReason ValueOutOfRange(string detail) =>
+        new(CapabilityReasonCode.ValueOutOfRange, detail);
+
+    private static bool FirmwareVerified(ClawIdentityState identity, FirmwareKind kind) => kind switch
+    {
+        FirmwareKind.Wmi => identity.WmiFirmwareVerified,
+        FirmwareKind.Mcu => identity.McuFirmwareVerified,
+        _ => true,
+    };
+
+    private static CapabilityCommandResult NormalizeCommandResult(
+        CapabilityCommand command,
+        CapabilityCommandResult result)
+    {
+        if (result.CommandId != command.CommandId)
+        {
+            return Indeterminate(command, "Capability handler returned a result for another command.");
+        }
+
+        if (result.Outcome is CommandOutcome.AppliedVerified && result.ReadbackValue is null)
+        {
+            return result with
+            {
+                Outcome = CommandOutcome.AppliedUnverified,
+                Reason = new CapabilityReason(
+                    CapabilityReasonCode.TransportFaulted,
+                    "Handler claimed verified application without readback evidence."),
+            };
+        }
+
+        return result.Outcome is not CommandOutcome.AppliedVerified && result.ReadbackValue is not null
+            ? result with { ReadbackValue = null }
+            : result;
+    }
+
+    private static void EnsureUniqueCapabilityKeys(IReadOnlyList<CapabilityDescriptor> descriptors)
+    {
+        HashSet<string> keys = new(StringComparer.Ordinal);
+        foreach (CapabilityDescriptor descriptor in descriptors)
+        {
+            string key = CapabilityKey(
+                descriptor.CapabilityId,
+                descriptor.InstanceId);
+            if (!keys.Add(key))
+            {
+                throw new InvalidOperationException($"Capability '{key}' is registered more than once.");
+            }
+        }
+    }
+
+    private static string CapabilityKey(string capabilityId, string? instanceId) =>
+        instanceId is null ? capabilityId : $"{capabilityId}/{instanceId}";
+
+    private static CapabilityDescriptor FanCurveDescriptor(string instance) => new()
+    {
+        CapabilityId = CapabilityIds.FanCurve,
+        InstanceId = instance,
+        Role = CapabilityRole.FanCurve,
+        ValueKind = CapabilityValueKind.Curve,
+        Display = new CapabilityDisplay
+        {
+            Key = instance == CapabilityInstances.Left ? DisplayKey.FanLeft : DisplayKey.FanRight,
+        },
+        SupportsRead = true,
+        SupportsWrite = true,
+        Persistence = CapabilityPersistence.Volatile,
+    };
+
+    private static CapabilityDescriptor LightingColorDescriptor(string instance, string label) => new()
+    {
+        CapabilityId = CapabilityIds.LightingColor,
+        InstanceId = instance,
+        Role = CapabilityRole.LightingZoneColor,
+        ValueKind = CapabilityValueKind.Color,
+        Display = new CapabilityDisplay { Key = DisplayKey.Custom, CustomLabel = label },
+        SupportsRead = true,
+        SupportsWrite = true,
+        Persistence = CapabilityPersistence.DevicePersistent,
+    };
 
     private async ValueTask PublishCapabilityStatesAsync(CancellationToken cancellationToken)
     {
-        if (_host is null || _registry is null)
+        if (_host is null || _descriptorSet is null)
         {
             return;
         }
 
-        foreach (CapabilityDescriptor descriptor in _registry.DescriptorSet.Descriptors)
+        foreach (CapabilityDescriptor descriptor in _descriptorSet.Descriptors)
         {
-            (ClawResourceBase resource, CapabilityValue? value) = CurrentState(descriptor);
+            ClawServiceStatus? service = ServiceForCapability(descriptor.CapabilityId);
+            if (service is null)
+            {
+                continue;
+            }
+
+            CapabilityValue? value = CurrentState(descriptor);
             await _host.PublishCapabilityStateAsync(
                 new CapabilityState
                 {
                     CapabilityId = descriptor.CapabilityId,
                     InstanceId = descriptor.InstanceId,
-                    Available = resource.State is ResourceState.Owned,
-                    Reason = resource.Reason ?? ReasonFor(resource.State),
+                    Available = service.State is ClawServiceState.Owned,
+                    Reason = service.Reason ?? ReasonFor(service.State),
                     ObservedValue = value,
                     Quality = value is null
                         ? HardwareStateQuality.Unknown
                         : HardwareStateQuality.Observed,
                     ObservedAt = value is null ? null : DateTimeOffset.UtcNow,
-                    DescriptorGeneration = _registry.DescriptorSet.Generation,
-                    DeviceGeneration = _deviceGeneration,
-                    HostGeneration = _hostGeneration,
+                    DescriptorGeneration = _descriptorSet.Generation,
+                    CycleGeneration = _cycleGeneration,
                 },
                 cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private (ClawResourceBase Resource, CapabilityValue? Value) CurrentState(CapabilityDescriptor descriptor)
+    private CapabilityValue? CurrentState(CapabilityDescriptor descriptor)
     {
         if (descriptor.CapabilityId == CapabilityIds.PowerSustained)
         {
-            return (_power!, _power!.LastObserved is { } value ? Integer(value.SustainedWatts) : null);
+            return _power!.LastObserved is { } value ? Integer(value.SustainedWatts) : null;
         }
 
         if (descriptor.CapabilityId == CapabilityIds.PowerBoost)
         {
-            return (_power!, _power!.LastObserved is { } value ? Integer(value.BoostWatts) : null);
+            return _power!.LastObserved is { } value ? Integer(value.BoostWatts) : null;
         }
 
         if (descriptor.CapabilityId == CapabilityIds.Scenario)
         {
-            return (_power!, _power!.LastObserved is { } value ? Scenario(value.Scenario) : null);
+            return _power!.LastObserved is { } value ? Scenario(value.Scenario) : null;
         }
 
         if (descriptor.CapabilityId == CapabilityIds.FanMode)
         {
-            return (_fans!, _fans!.LastObserved is { } value ? FanMode(value) : null);
+            return _fans!.LastObserved is { } value ? FanMode(value) : null;
         }
 
         if (descriptor.CapabilityId == CapabilityIds.FanCurve)
         {
             FanSnapshot? value = _fans!.LastObserved;
-            return (_fans, value is null
+            return value is null
                 ? null
-                : Curve(descriptor.InstanceId == CapabilityInstances.Left ? value.Left : value.Right));
+                : Curve(descriptor.InstanceId == CapabilityInstances.Left ? value.Left : value.Right);
         }
 
         if (descriptor.CapabilityId == CapabilityIds.FanRpm)
         {
             FanTelemetry? value = _telemetry!.LastTelemetry;
-            return (_telemetry, value is null
+            return value is null
                 ? null
-                : Integer(descriptor.InstanceId == CapabilityInstances.Left ? value.LeftRpm : value.RightRpm));
+                : Integer(descriptor.InstanceId == CapabilityInstances.Left ? value.LeftRpm : value.RightRpm);
         }
 
         if (descriptor.CapabilityId == CapabilityIds.Temperature)
         {
-            return (_telemetry!, _telemetry!.LastTelemetry is { } value
+            return _telemetry!.LastTelemetry is { } value
                 ? Integer(value.TemperatureCelsius)
-                : null);
+                : null;
         }
 
         if (descriptor.CapabilityId == CapabilityIds.LightingBrightness)
         {
-            return (_lighting!, _lighting!.LastObserved is { } value ? Integer(value.Brightness) : null);
+            return _lighting!.LastObserved is { } value ? Integer(value.Brightness) : null;
         }
 
         if (descriptor.CapabilityId == CapabilityIds.LightingColor)
         {
             LightingState? value = _lighting!.LastObserved;
-            return (_lighting, value is null
+            return value is null
                 ? null
                 : Color(descriptor.InstanceId switch
                 {
@@ -856,37 +1342,15 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                     CapabilityInstances.LeftRing => value.LeftRingColor,
                     CapabilityInstances.Buttons => value.ButtonsColor,
                     _ => 0,
-                }));
+                });
         }
 
         if (descriptor.CapabilityId == CapabilityIds.Motion)
         {
-            return (_motion!, Boolean(_motion!.State is ResourceState.Owned));
+            return Boolean(_motion!.State is ClawServiceState.Owned);
         }
 
-        return (_controller!, Boolean(_controller!.State is ResourceState.Owned));
-    }
-
-    private async ValueTask PublishResourceStateAsync(
-        ClawResourceBase resource,
-        ResourceState state,
-        CancellationToken cancellationToken,
-        CapabilityReason? reason = null)
-    {
-        if (_host is null)
-        {
-            return;
-        }
-
-        await _host.PublishResourceStateAsync(
-            new PluginResourceState
-            {
-                ResourceId = resource.ResourceId,
-                State = state,
-                Reason = reason ?? resource.Reason,
-                DeviceGeneration = _deviceGeneration,
-            },
-            cancellationToken).ConfigureAwait(false);
+        return Boolean(_controller!.State is ClawServiceState.Owned);
     }
 
     private async ValueTask RefreshObservedAsync(
@@ -909,11 +1373,11 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     }
 
     private async ValueTask<CapabilityCommandResult> JournalCommandAsync(
-        string resourceId,
+        string serviceId,
         string firmwareIdentity,
-        PluginCommandExecution execution,
-        Func<CancellationToken, ValueTask<CapabilityValue>> readOriginal,
-        PluginCommandHandler apply,
+        CapabilityCommand command,
+        Func<CancellationToken, ValueTask<ClawRecoveryState>> readOriginal,
+        ClawCommandHandler apply,
         CancellationToken cancellationToken)
     {
         if (_journal is null)
@@ -921,55 +1385,47 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             throw new InvalidOperationException("The recovery journal is unavailable.");
         }
 
-        RequireCommandWriteBudget(execution.Command.Deadline);
-        CapabilityValue originalValue = await readOriginal(cancellationToken).ConfigureAwait(false);
-        RecoveryJournalEntry entry = await _journal.BeginAsync(
-            resourceId,
-            execution.Command.CapabilityId,
+        RequireCommandWriteBudget(command.Deadline);
+        ClawRecoveryState originalState = await readOriginal(cancellationToken).ConfigureAwait(false);
+        ClawRecoveryOperation operation = await _journal.BeginAsync(
+            serviceId,
+            command.CapabilityId,
             firmwareIdentity,
-            originalValue,
-            execution.Command.RequestedValue,
+            originalState,
             cancellationToken).ConfigureAwait(false);
-        RequireCommandWriteBudget(execution.Command.Deadline);
-        entry = await _journal.MarkApplyingAsync(entry, cancellationToken).ConfigureAwait(false);
+        RequireCommandWriteBudget(command.Deadline);
         CapabilityCommandResult result;
         try
         {
-            result = await apply(execution, cancellationToken).ConfigureAwait(false);
+            result = await apply(command, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             // A transport exception does not prove whether the firmware accepted a write. Keep the
-            // exact pre-command value outstanding for recovery instead of abandoning Applying.
-            _ = await _journal.MarkAppliedAsync(
-                entry,
-                execution.Command.RequestedValue ?? originalValue,
-                verified: false,
-                CancellationToken.None).ConfigureAwait(false);
+            // exact pre-command value outstanding for recovery.
             throw;
         }
 
-        _ = await _journal.CompleteApplicationAsync(entry, result, CancellationToken.None)
+        _ = await _journal.CompleteCommandAsync(operation, result, CancellationToken.None)
             .ConfigureAwait(false);
         if (result.Rollback is RollbackResult.RestoreFailed)
         {
-            ClawResourceBase? resource = resourceId switch
+            ClawServiceStatus? service = serviceId switch
             {
-                ResourceIds.Power => _power,
-                ResourceIds.Fans => _fans,
+                ServiceIds.Power => _power,
+                ServiceIds.Fans => _fans,
                 _ => null,
             };
-            if (resource is not null)
+            if (service is not null)
             {
                 CapabilityReason reason = new(
                     CapabilityReasonCode.TransportFaulted,
-                    "A command rollback failed; the resource is quarantined until reconciliation.");
-                resource.Quarantine(reason);
-                await PublishResourceStateAsync(
-                    resource,
-                    ResourceState.Faulted,
-                    CancellationToken.None,
-                    reason).ConfigureAwait(false);
+                    "A command rollback failed; the resource is faulted until reconciliation.");
+                service.Fault(reason);
+                await ApplyServiceLifecycleStateAsync(
+                    service,
+                    new ClawServiceResult(ClawServiceState.Faulted, reason),
+                    CancellationToken.None).ConfigureAwait(false);
             }
         }
 
@@ -977,7 +1433,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     }
 
     private async ValueTask ReconcileOutstandingAsync(
-        IReadOnlyList<RecoveryJournalEntry> entries,
+        IReadOnlyList<ClawRecoveryEntry> entries,
         ClawIdentityState identity,
         ClawA2VmPowerCapability powerCapability,
         ClawA2VmFanCapability fanCapability,
@@ -988,43 +1444,26 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             return;
         }
 
-        foreach (RecoveryJournalEntry entry in entries.OrderByDescending(entry => entry.Sequence))
+        foreach (ClawRecoveryEntry entry in entries)
         {
-            if (ResourceFor(entry.ResourceId)?.ReconciliationBlockReason is not null)
+            if (ServiceFor(entry.ServiceId)?.ReconciliationBlockReason is not null)
             {
                 continue;
             }
 
-            if (!string.Equals(entry.PackageId, PackageId, StringComparison.Ordinal)
-                || !string.Equals(
-                    entry.DeviceId,
-                    ClawHardwareFacts.DeviceDefinitionId,
-                    StringComparison.Ordinal))
+            string? currentFirmware = entry.ServiceId switch
             {
-                BlockResource(entry.ResourceId, new CapabilityReason(
-                    CapabilityReasonCode.GenerationChanged,
-                    "The recovery entry belongs to another package or device definition."));
-                continue;
-            }
-
-            string? currentFirmware = entry.ResourceId switch
-            {
-                ResourceIds.Power or ResourceIds.Fans when identity.WmiFirmwareVerified =>
+                ServiceIds.Power or ServiceIds.Fans when identity.WmiFirmwareVerified =>
                     ClawFirmwareIdentities.Wmi,
-                ResourceIds.Controller when identity.McuFirmwareVerified =>
+                ServiceIds.Controller when identity.McuFirmwareVerified =>
                     ClawFirmwareIdentities.Mcu,
                 _ => null,
             };
-            ReconciliationAction action = JournalReconciliation.Decide(entry, currentFirmware);
-            if (action is ReconciliationAction.None)
+            ClawReconciliationAction action = ClawRecoveryJournal.Decide(entry, currentFirmware);
+            if (action is not ClawReconciliationAction.Restore)
             {
-                continue;
-            }
-
-            if (action is not ReconciliationAction.Restore)
-            {
-                BlockResource(entry.ResourceId, new CapabilityReason(
-                    action is ReconciliationAction.Quarantine
+                BlockService(entry.ServiceId, new CapabilityReason(
+                    action is ClawReconciliationAction.Block
                         ? CapabilityReasonCode.TransportFaulted
                         : CapabilityReasonCode.FirmwareNotVerified,
                     "An outstanding recovery entry is not safe to restore automatically."));
@@ -1035,17 +1474,17 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             bool restoreFailed = false;
             try
             {
-                restored = entry.ResourceId switch
+                restored = entry.ServiceId switch
                 {
-                    ResourceIds.Power when ClawRecoveryValues.TryPower(
-                        entry.OriginalValue,
+                    ServiceIds.Power when ClawRecoveryValues.TryPower(
+                        entry.OriginalState,
                         out PowerPair? power) =>
                         await powerCapability.RestoreAsync(power!, cancellationToken).ConfigureAwait(false),
-                    ResourceIds.Fans when ClawRecoveryValues.TryFans(
-                        entry.OriginalValue,
+                    ServiceIds.Fans when ClawRecoveryValues.TryFans(
+                        entry.OriginalState,
                         out FanSnapshot? fans) =>
                         await fanCapability.RestoreAsync(fans!, cancellationToken).ConfigureAwait(false),
-                    ResourceIds.Controller =>
+                    ServiceIds.Controller =>
                         await RestoreControllerJournalEntryAsync(entry, cancellationToken)
                             .ConfigureAwait(false),
                     _ => false,
@@ -1057,7 +1496,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 restoreFailed = true;
                 _ = await _journal.CompleteExistingAsync(
                     entry,
-                    JournalEntryStatus.RestoreFailed,
+                    ClawRecoveryStatus.RestoreFailed,
                     CancellationToken.None).ConfigureAwait(false);
             }
 
@@ -1065,20 +1504,20 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             {
                 _ = await _journal.CompleteExistingAsync(
                     entry,
-                    JournalEntryStatus.RestoredVerified,
+                    ClawRecoveryStatus.RestoredVerified,
                     cancellationToken).ConfigureAwait(false);
             }
             else if (!restoreFailed)
             {
                 _ = await _journal.CompleteExistingAsync(
                     entry,
-                    JournalEntryStatus.RestoredUnverified,
+                    ClawRecoveryStatus.RestoredUnverified,
                     cancellationToken).ConfigureAwait(false);
             }
 
             if (!restored)
             {
-                BlockResource(entry.ResourceId, new CapabilityReason(
+                BlockService(entry.ServiceId, new CapabilityReason(
                     CapabilityReasonCode.TransportFaulted,
                     "An outstanding hardware state could not be restored and verified."));
             }
@@ -1086,10 +1525,10 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     }
 
     private async ValueTask<bool> RestoreControllerJournalEntryAsync(
-        RecoveryJournalEntry entry,
+        ClawRecoveryEntry entry,
         CancellationToken cancellationToken)
     {
-        if (!ClawRecoveryValues.TryControllerMode(entry.OriginalValue, out ClawControllerMode mode))
+        if (!ClawRecoveryValues.TryControllerMode(entry.OriginalState, out ClawControllerMode mode))
         {
             return false;
         }
@@ -1118,20 +1557,20 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 current.PhysicalLocation);
     }
 
-    private void BlockResource(string resourceId, CapabilityReason reason)
+    private void BlockService(string serviceId, CapabilityReason reason)
     {
-        ClawResourceBase? resource = ResourceFor(resourceId);
-        if (resource is not null)
+        ClawServiceStatus? service = ServiceFor(serviceId);
+        if (service is not null)
         {
-            resource.ReconciliationBlockReason = reason;
+            service.ReconciliationBlockReason = reason;
         }
     }
 
-    private ClawResourceBase? ResourceFor(string resourceId) => resourceId switch
+    private ClawServiceStatus? ServiceFor(string serviceId) => serviceId switch
     {
-        ResourceIds.Power => _power,
-        ResourceIds.Fans => _fans,
-        ResourceIds.Controller => _controller,
+        ServiceIds.Power => _power,
+        ServiceIds.Fans => _fans,
+        ServiceIds.Controller => _controller,
         _ => null,
     };
 
@@ -1144,26 +1583,58 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         }
     }
 
-    private void Remember(string key, CapabilityCommandResult result)
-    {
-        lock (_commandGate)
-        {
-            if (_idempotency.ContainsKey(key))
-            {
-                return;
-            }
+    private ClawCycleContext OperationContext(DateTimeOffset deadline) =>
+        new(_cycleGeneration, deadline);
 
-            _idempotency.Add(key, result);
-            _idempotencyOrder.Enqueue(key);
-            while (_idempotencyOrder.Count > 128)
-            {
-                _idempotency.Remove(_idempotencyOrder.Dequeue());
-            }
-        }
+    private PluginStartResult CurrentStartResult()
+    {
+        int owned = _serviceStatuses.Count(service => service.State is ClawServiceState.Owned);
+        bool unhealthy = _serviceStatuses.Any(service => service.State is not ClawServiceState.Owned);
+        ClawServiceStatus? firstUnhealthy = _serviceStatuses.FirstOrDefault(
+            service => service.State is not ClawServiceState.Owned);
+        return new PluginStartResult
+        {
+            State = owned == 0
+                ? PluginOperationalState.Passive
+                : unhealthy ? PluginOperationalState.Degraded : PluginOperationalState.Active,
+            Reason = firstUnhealthy?.Reason ?? (owned == 0
+                ? new CapabilityReason(
+                    CapabilityReasonCode.PrerequisiteMissing,
+                    "No Claw hardware service could be acquired.")
+                : null),
+        };
     }
 
-    private PluginResourceOperationContext OperationContext(DateTimeOffset deadline) =>
-        new(_hostGeneration, _deviceGeneration, deadline);
+    private PluginStopResult CurrentStopResult()
+    {
+        ClawServiceStatus? failed = _serviceStatuses.FirstOrDefault(
+            service => service.State is ClawServiceState.Faulted);
+        ClawServiceStatus? unverified = _serviceStatuses.FirstOrDefault(
+            service => service.State is ClawServiceState.ReleasedUnverified);
+        if (failed is not null)
+        {
+            return new PluginStopResult
+            {
+                Status = PluginStopStatus.Failed,
+                Reason = failed.Reason ?? new CapabilityReason(
+                    CapabilityReasonCode.TransportFaulted,
+                    $"Service '{failed.ServiceId}' cleanup failed."),
+            };
+        }
+
+        if (unverified is not null)
+        {
+            return new PluginStopResult
+            {
+                Status = PluginStopStatus.Unverified,
+                Reason = unverified.Reason ?? new CapabilityReason(
+                    CapabilityReasonCode.TransportFaulted,
+                    $"Service '{unverified.ServiceId}' cleanup was not verified."),
+            };
+        }
+
+        return new PluginStopResult { Status = PluginStopStatus.Clean };
+    }
 
     private static IReadOnlyList<OemControlDescriptor> CreateOemControls() =>
     [
@@ -1309,24 +1780,45 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             CompletedAt = DateTimeOffset.UtcNow,
         };
 
+    private static CapabilityCommandResult Rejected(
+        CapabilityCommand command,
+        CapabilityReason reason) => new()
+        {
+            CommandId = command.CommandId,
+            Outcome = CommandOutcome.Rejected,
+            Reason = reason,
+            CompletedAt = DateTimeOffset.UtcNow,
+        };
+
+    private static CapabilityCommandResult Indeterminate(
+        CapabilityCommand command,
+        string detail) => new()
+        {
+            CommandId = command.CommandId,
+            Outcome = CommandOutcome.Indeterminate,
+            Reason = new CapabilityReason(CapabilityReasonCode.TransportFaulted, detail),
+            Rollback = RollbackResult.RestoredUnverified,
+            CompletedAt = DateTimeOffset.UtcNow,
+        };
+
     private static ValueTask<CapabilityCommandResult> ReadOnlyHandler(
-        PluginCommandExecution execution,
+        CapabilityCommand command,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return ValueTask.FromResult(Rejected(
-            execution.Command,
+            command,
             CapabilityReasonCode.Unsupported,
             "This capability is read-only."));
     }
 
-    private static CapabilityReason? ReasonFor(ResourceState state) => state switch
+    private static CapabilityReason? ReasonFor(ClawServiceState state) => state switch
     {
-        ResourceState.Owned => null,
-        ResourceState.Passive => new CapabilityReason(CapabilityReasonCode.PrerequisiteMissing),
-        ResourceState.Degraded or ResourceState.Faulted or ResourceState.ReleasedUnverified =>
+        ClawServiceState.Owned => null,
+        ClawServiceState.Passive => new CapabilityReason(CapabilityReasonCode.PrerequisiteMissing),
+        ClawServiceState.Degraded or ClawServiceState.Faulted or ClawServiceState.ReleasedUnverified =>
             new CapabilityReason(CapabilityReasonCode.TransportFaulted),
-        ResourceState.Releasing => new CapabilityReason(CapabilityReasonCode.Quiescing),
+        ClawServiceState.Releasing => new CapabilityReason(CapabilityReasonCode.Quiescing),
         _ => new CapabilityReason(CapabilityReasonCode.ResourceReleased),
     };
 
@@ -1342,6 +1834,10 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             new WindowsClawMotionSource(),
             new FirmwareChordSuppressor());
     }
+
+    private delegate ValueTask<CapabilityCommandResult> ClawCommandHandler(
+        CapabilityCommand command,
+        CancellationToken cancellationToken);
 
     private enum FirmwareKind
     {

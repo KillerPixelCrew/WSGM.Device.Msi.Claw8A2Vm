@@ -4,14 +4,13 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using WSGM.Device.Contracts.Capabilities;
+using WSGM.Device.Sdk.Capabilities;
 
 namespace WSGM.Device.Msi.Claw8A2Vm;
 
 internal sealed class ClawA2VmPowerCapability(IMsiWmiTransport transport)
 {
     private readonly IMsiWmiTransport _transport = transport ?? throw new ArgumentNullException(nameof(transport));
-    private readonly SemaphoreSlim _transaction = new(1, 1);
 
     public async ValueTask<PowerPair> ReadAsync(CancellationToken cancellationToken)
     {
@@ -35,23 +34,15 @@ internal sealed class ClawA2VmPowerCapability(IMsiWmiTransport transport)
         int watts,
         CancellationToken cancellationToken)
     {
-        await _transaction.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        PowerPair before = await ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (watts is < 8 or > 30 || before.BoostWatts < watts || before.BoostWatts > 37)
         {
-            PowerPair before = await ReadAsync(cancellationToken).ConfigureAwait(false);
-            if (watts is < 8 or > 30 || before.BoostWatts < watts || before.BoostWatts > 37)
-            {
-                return Rejected(command, CapabilityReasonCode.ValueOutOfRange,
-                    "PL1 must be 8-30 W and cannot exceed the current PL2 value.");
-            }
+            return Rejected(command, CapabilityReasonCode.ValueOutOfRange,
+                "PL1 must be 8-30 W and cannot exceed the current PL2 value.");
+        }
 
-            return await ApplyPairCoreAsync(command, before, watts, before.BoostWatts, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        finally
-        {
-            _transaction.Release();
-        }
+        return await ApplyPairCoreAsync(command, before, watts, before.BoostWatts, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async ValueTask<CapabilityCommandResult> ApplyBoostAsync(
@@ -59,47 +50,31 @@ internal sealed class ClawA2VmPowerCapability(IMsiWmiTransport transport)
         int watts,
         CancellationToken cancellationToken)
     {
-        await _transaction.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        PowerPair before = await ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (watts is < 8 or > 37 || watts < before.SustainedWatts)
         {
-            PowerPair before = await ReadAsync(cancellationToken).ConfigureAwait(false);
-            if (watts is < 8 or > 37 || watts < before.SustainedWatts)
-            {
-                return Rejected(command, CapabilityReasonCode.ValueOutOfRange,
-                    "PL2 must be 8-37 W and cannot be below the current PL1 value.");
-            }
+            return Rejected(command, CapabilityReasonCode.ValueOutOfRange,
+                "PL2 must be 8-37 W and cannot be below the current PL1 value.");
+        }
 
-            return await ApplyPairCoreAsync(command, before, before.SustainedWatts, watts, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        finally
-        {
-            _transaction.Release();
-        }
+        return await ApplyPairCoreAsync(command, before, before.SustainedWatts, watts, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async ValueTask<bool> RestoreAsync(PowerPair snapshot, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        await _transaction.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        PowerPair current = await ReadAsync(cancellationToken).ConfigureAwait(false);
+        await WritePairOrderedAsync(current, snapshot.SustainedWatts, snapshot.BoostWatts, cancellationToken)
+            .ConfigureAwait(false);
+        if (current.Scenario != snapshot.Scenario)
         {
-            PowerPair current = await ReadAsync(cancellationToken).ConfigureAwait(false);
-            await WritePairOrderedAsync(current, snapshot.SustainedWatts, snapshot.BoostWatts, cancellationToken)
+            await WriteDataAsync(ClawHardwareFacts.ScenarioAddress, snapshot.Scenario, cancellationToken)
                 .ConfigureAwait(false);
-            if (current.Scenario != snapshot.Scenario)
-            {
-                await WriteDataAsync(ClawHardwareFacts.ScenarioAddress, snapshot.Scenario, cancellationToken)
-                    .ConfigureAwait(false);
-            }
+        }
 
-            PowerPair readback = await ReadAsync(cancellationToken).ConfigureAwait(false);
-            return readback == snapshot;
-        }
-        finally
-        {
-            _transaction.Release();
-        }
+        PowerPair readback = await ReadAsync(cancellationToken).ConfigureAwait(false);
+        return readback == snapshot;
     }
 
     private async ValueTask<CapabilityCommandResult> ApplyPairCoreAsync(
@@ -229,7 +204,6 @@ internal sealed class ClawA2VmFanCapability(IMsiWmiTransport transport)
     private static readonly int[] TemperatureOffsets = [1, 4, 5, 6, 7, 8];
     private static readonly int[] DutyOffsets = [2, 3, 4, 5, 6, 7];
     private readonly IMsiWmiTransport _transport = transport ?? throw new ArgumentNullException(nameof(transport));
-    private readonly SemaphoreSlim _transaction = new(1, 1);
 
     public async ValueTask<FanSnapshot> ReadSnapshotAsync(CancellationToken cancellationToken)
     {
@@ -263,48 +237,40 @@ internal sealed class ClawA2VmFanCapability(IMsiWmiTransport transport)
         string mode,
         CancellationToken cancellationToken)
     {
-        await _transaction.WaitAsync(cancellationToken).ConfigureAwait(false);
+        FanSnapshot before = await ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        (bool custom, bool full) = mode switch
+        {
+            "automatic" => (false, false),
+            "custom" => (true, false),
+            "full-speed" => (false, true),
+            _ => throw new ArgumentOutOfRangeException(nameof(mode)),
+        };
+
         try
         {
-            FanSnapshot before = await ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
-            (bool custom, bool full) = mode switch
+            await WriteFlagAsync(
+                ClawHardwareFacts.FanCustomAddress,
+                before.CustomFlag,
+                custom,
+                cancellationToken).ConfigureAwait(false);
+            await WriteFlagAsync(
+                ClawHardwareFacts.FanFullSpeedAddress,
+                before.FullSpeedFlag,
+                full,
+                cancellationToken).ConfigureAwait(false);
+            FanSnapshot readback = await ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
+            if (Flag(readback.CustomFlag) == custom && Flag(readback.FullSpeedFlag) == full)
             {
-                "automatic" => (false, false),
-                "custom" => (true, false),
-                "full-speed" => (false, true),
-                _ => throw new ArgumentOutOfRangeException(nameof(mode)),
-            };
-
-            try
-            {
-                await WriteFlagAsync(
-                    ClawHardwareFacts.FanCustomAddress,
-                    before.CustomFlag,
-                    custom,
-                    cancellationToken).ConfigureAwait(false);
-                await WriteFlagAsync(
-                    ClawHardwareFacts.FanFullSpeedAddress,
-                    before.FullSpeedFlag,
-                    full,
-                    cancellationToken).ConfigureAwait(false);
-                FanSnapshot readback = await ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
-                if (Flag(readback.CustomFlag) == custom && Flag(readback.FullSpeedFlag) == full)
-                {
-                    return Verified(command, Choice(mode));
-                }
+                return Verified(command, Choice(mode));
             }
-            catch (Exception ex) when (ex is not OutOfMemoryException)
-            {
-                // The exact snapshot below is the recovery authority after any partial flag write.
-            }
-
-            RollbackResult rollback = await TryRestoreAsync(before, CancellationToken.None).ConfigureAwait(false);
-            return Indeterminate(command, "Fan-mode readback did not match.", rollback);
         }
-        finally
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            _transaction.Release();
+            // The exact snapshot below is the recovery authority after any partial flag write.
         }
+
+        RollbackResult rollback = await TryRestoreAsync(before, CancellationToken.None).ConfigureAwait(false);
+        return Indeterminate(command, "Fan-mode readback did not match.", rollback);
     }
 
     public async ValueTask<CapabilityCommandResult> ApplyCurveAsync(
@@ -318,55 +284,39 @@ internal sealed class ClawA2VmFanCapability(IMsiWmiTransport transport)
             return Rejected(command, validationError!);
         }
 
-        await _transaction.WaitAsync(cancellationToken).ConfigureAwait(false);
+        FanSnapshot before = await ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        FanTable current = channel == 1 ? before.Left : before.Right;
+        byte[] temperatures = [.. current.TemperatureBuffer];
+        byte[] duties = [.. current.DutyBuffer];
+        for (int i = 0; i < curve.Count; i++)
+        {
+            temperatures[TemperatureOffsets[i]] = checked((byte)curve[i].Input);
+            duties[DutyOffsets[i]] = checked((byte)curve[i].Output);
+        }
+
         try
         {
-            FanSnapshot before = await ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
-            FanTable current = channel == 1 ? before.Left : before.Right;
-            byte[] temperatures = [.. current.TemperatureBuffer];
-            byte[] duties = [.. current.DutyBuffer];
-            for (int i = 0; i < curve.Count; i++)
+            await WriteTableAsync(channel, temperatures, duties, cancellationToken).ConfigureAwait(false);
+            FanTable readback = await ReadTableAsync(checked((byte)channel), cancellationToken)
+                .ConfigureAwait(false);
+            if (CurveEquals(readback, curve))
             {
-                temperatures[TemperatureOffsets[i]] = checked((byte)curve[i].Input);
-                duties[DutyOffsets[i]] = checked((byte)curve[i].Output);
+                return Verified(command, Curve(curve));
             }
-
-            try
-            {
-                await WriteTableAsync(channel, temperatures, duties, cancellationToken).ConfigureAwait(false);
-                FanTable readback = await ReadTableAsync(checked((byte)channel), cancellationToken)
-                    .ConfigureAwait(false);
-                if (CurveEquals(readback, curve))
-                {
-                    return Verified(command, Curve(curve));
-                }
-            }
-            catch (Exception ex) when (ex is not OutOfMemoryException)
-            {
-                // The exact two-channel snapshot below restores every touched byte and flag.
-            }
-
-            RollbackResult rollback = await TryRestoreAsync(before, CancellationToken.None).ConfigureAwait(false);
-            return Indeterminate(command, "Fan-table readback did not match.", rollback);
         }
-        finally
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            _transaction.Release();
+            // The exact two-channel snapshot below restores every touched byte and flag.
         }
+
+        RollbackResult rollback = await TryRestoreAsync(before, CancellationToken.None).ConfigureAwait(false);
+        return Indeterminate(command, "Fan-table readback did not match.", rollback);
     }
 
     public async ValueTask<bool> RestoreAsync(FanSnapshot snapshot, CancellationToken cancellationToken)
     {
-        await _transaction.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            return await TryRestoreAsync(snapshot, cancellationToken).ConfigureAwait(false)
-                is RollbackResult.RestoredVerified;
-        }
-        finally
-        {
-            _transaction.Release();
-        }
+        return await TryRestoreAsync(snapshot, cancellationToken).ConfigureAwait(false)
+            is RollbackResult.RestoredVerified;
     }
 
     internal static bool TryValidateCurve(IReadOnlyList<CurvePoint> curve, out string? error)
@@ -537,7 +487,6 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
 {
     private static readonly TimeSpan MinimumPersistentWriteInterval = TimeSpan.FromSeconds(1);
     private readonly IClawMcuTransport _transport = transport ?? throw new ArgumentNullException(nameof(transport));
-    private readonly SemaphoreSlim _transaction = new(1, 1);
     private LightingState? _observed;
     private DateTimeOffset _lastPersistentWrite;
 
@@ -565,113 +514,105 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
         Func<LightingState, LightingState> update,
         CancellationToken cancellationToken)
     {
-        await _transaction.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        LightingState before = await ReadAsync(cancellationToken).ConfigureAwait(false);
+        LightingState wanted = update(before);
+        if (wanted == before)
         {
-            LightingState before = await ReadAsync(cancellationToken).ConfigureAwait(false);
-            LightingState wanted = update(before);
-            if (wanted == before)
-            {
-                CapabilityValue currentValue = command.CapabilityId == CapabilityIds.LightingBrightness
-                    ? Integer(before.Brightness)
-                    : Color(command.InstanceId switch
-                    {
-                        CapabilityInstances.RightRing => before.RightRingColor,
-                        CapabilityInstances.LeftRing => before.LeftRingColor,
-                        CapabilityInstances.Buttons => before.ButtonsColor,
-                        _ => throw new InvalidOperationException("Unknown lighting zone."),
-                    });
-                return new CapabilityCommandResult
-                {
-                    CommandId = command.CommandId,
-                    Outcome = CommandOutcome.AppliedVerified,
-                    ReadbackValue = currentValue,
-                    CompletedAt = DateTimeOffset.UtcNow,
-                };
-            }
-
-            if (wanted.Brightness is < 0 or > 100
-                || !IsColor(wanted.RightRingColor)
-                || !IsColor(wanted.LeftRingColor)
-                || !IsColor(wanted.ButtonsColor))
-            {
-                return new CapabilityCommandResult
-                {
-                    CommandId = command.CommandId,
-                    Outcome = CommandOutcome.Rejected,
-                    Reason = new CapabilityReason(
-                        CapabilityReasonCode.ValueOutOfRange,
-                        "Lighting brightness or colour is outside the validated range."),
-                    CompletedAt = DateTimeOffset.UtcNow,
-                };
-            }
-
-            if (DateTimeOffset.UtcNow - _lastPersistentWrite < MinimumPersistentWriteInterval)
-            {
-                return new CapabilityCommandResult
-                {
-                    CommandId = command.CommandId,
-                    Outcome = CommandOutcome.Rejected,
-                    Reason = new CapabilityReason(
-                        CapabilityReasonCode.ResourceConflict,
-                        "Persistent lighting commits are limited to one per second.",
-                        Retryable: true),
-                    CompletedAt = DateTimeOffset.UtcNow,
-                };
-            }
-
-            if (command.Deadline - DateTimeOffset.UtcNow < TimeSpan.FromSeconds(2))
-            {
-                return new CapabilityCommandResult
-                {
-                    CommandId = command.CommandId,
-                    Outcome = CommandOutcome.Rejected,
-                    Reason = new CapabilityReason(
-                        CapabilityReasonCode.Quiescing,
-                        "Insufficient command budget for a persistent lighting write."),
-                    CompletedAt = DateTimeOffset.UtcNow,
-                };
-            }
-
-            byte[] payload = Encode(wanted);
-            _lastPersistentWrite = DateTimeOffset.UtcNow;
-            await _transport.WriteProfileAsync(
-                ClawHardwareFacts.LightingProfileAddress,
-                payload,
-                cancellationToken).ConfigureAwait(false);
-            LightingState readback = await ReadAsync(cancellationToken).ConfigureAwait(false);
-            CapabilityValue value = command.CapabilityId == CapabilityIds.LightingBrightness
-                ? Integer(readback.Brightness)
+            CapabilityValue currentValue = command.CapabilityId == CapabilityIds.LightingBrightness
+                ? Integer(before.Brightness)
                 : Color(command.InstanceId switch
                 {
-                    CapabilityInstances.RightRing => readback.RightRingColor,
-                    CapabilityInstances.LeftRing => readback.LeftRingColor,
-                    CapabilityInstances.Buttons => readback.ButtonsColor,
+                    CapabilityInstances.RightRing => before.RightRingColor,
+                    CapabilityInstances.LeftRing => before.LeftRingColor,
+                    CapabilityInstances.Buttons => before.ButtonsColor,
                     _ => throw new InvalidOperationException("Unknown lighting zone."),
                 });
-            return readback == wanted
-                ? new CapabilityCommandResult
-                {
-                    CommandId = command.CommandId,
-                    Outcome = CommandOutcome.AppliedVerified,
-                    ReadbackValue = value,
-                    CompletedAt = DateTimeOffset.UtcNow,
-                }
-                : new CapabilityCommandResult
-                {
-                    CommandId = command.CommandId,
-                    Outcome = CommandOutcome.Indeterminate,
-                    Reason = new CapabilityReason(
-                        CapabilityReasonCode.TransportFaulted,
-                        "Persistent lighting readback did not match the committed profile."),
-                    Rollback = RollbackResult.NotRequired,
-                    CompletedAt = DateTimeOffset.UtcNow,
-                };
+            return new CapabilityCommandResult
+            {
+                CommandId = command.CommandId,
+                Outcome = CommandOutcome.AppliedVerified,
+                ReadbackValue = currentValue,
+                CompletedAt = DateTimeOffset.UtcNow,
+            };
         }
-        finally
+
+        if (wanted.Brightness is < 0 or > 100
+            || !IsColor(wanted.RightRingColor)
+            || !IsColor(wanted.LeftRingColor)
+            || !IsColor(wanted.ButtonsColor))
         {
-            _transaction.Release();
+            return new CapabilityCommandResult
+            {
+                CommandId = command.CommandId,
+                Outcome = CommandOutcome.Rejected,
+                Reason = new CapabilityReason(
+                    CapabilityReasonCode.ValueOutOfRange,
+                    "Lighting brightness or colour is outside the validated range."),
+                CompletedAt = DateTimeOffset.UtcNow,
+            };
         }
+
+        if (DateTimeOffset.UtcNow - _lastPersistentWrite < MinimumPersistentWriteInterval)
+        {
+            return new CapabilityCommandResult
+            {
+                CommandId = command.CommandId,
+                Outcome = CommandOutcome.Rejected,
+                Reason = new CapabilityReason(
+                    CapabilityReasonCode.ResourceConflict,
+                    "Persistent lighting commits are limited to one per second.",
+                    Retryable: true),
+                CompletedAt = DateTimeOffset.UtcNow,
+            };
+        }
+
+        if (command.Deadline - DateTimeOffset.UtcNow < TimeSpan.FromSeconds(2))
+        {
+            return new CapabilityCommandResult
+            {
+                CommandId = command.CommandId,
+                Outcome = CommandOutcome.Rejected,
+                Reason = new CapabilityReason(
+                    CapabilityReasonCode.Quiescing,
+                    "Insufficient command budget for a persistent lighting write."),
+                CompletedAt = DateTimeOffset.UtcNow,
+            };
+        }
+
+        byte[] payload = Encode(wanted);
+        _lastPersistentWrite = DateTimeOffset.UtcNow;
+        await _transport.WriteProfileAsync(
+            ClawHardwareFacts.LightingProfileAddress,
+            payload,
+            cancellationToken).ConfigureAwait(false);
+        LightingState readback = await ReadAsync(cancellationToken).ConfigureAwait(false);
+        CapabilityValue value = command.CapabilityId == CapabilityIds.LightingBrightness
+            ? Integer(readback.Brightness)
+            : Color(command.InstanceId switch
+            {
+                CapabilityInstances.RightRing => readback.RightRingColor,
+                CapabilityInstances.LeftRing => readback.LeftRingColor,
+                CapabilityInstances.Buttons => readback.ButtonsColor,
+                _ => throw new InvalidOperationException("Unknown lighting zone."),
+            });
+        return readback == wanted
+            ? new CapabilityCommandResult
+            {
+                CommandId = command.CommandId,
+                Outcome = CommandOutcome.AppliedVerified,
+                ReadbackValue = value,
+                CompletedAt = DateTimeOffset.UtcNow,
+            }
+            : new CapabilityCommandResult
+            {
+                CommandId = command.CommandId,
+                Outcome = CommandOutcome.Indeterminate,
+                Reason = new CapabilityReason(
+                    CapabilityReasonCode.TransportFaulted,
+                    "Persistent lighting readback did not match the committed profile."),
+                Rollback = RollbackResult.NotRequired,
+                CompletedAt = DateTimeOffset.UtcNow,
+            };
     }
 
     internal static byte[] Encode(LightingState state)
