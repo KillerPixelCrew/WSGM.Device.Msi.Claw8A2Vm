@@ -36,6 +36,19 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     private bool _active;
     private bool _quiescing;
     private bool _disposed;
+    private CancellationTokenSource? _observationLoop;
+    private Task? _observationTask;
+
+    /// <summary>How often the plugin re-reads and republishes what it observes.</summary>
+    /// <remarks>
+    /// Comfortably inside WSGM's 30-second freshness policy, so an observation is replaced twice
+    /// before it can expire. Without this loop the plugin published state at start, at resume, and
+    /// after a command, and never again — so every readable capability went stale thirty seconds
+    /// into the cycle and stayed that way until the user happened to change something. The visible
+    /// form was the QAM's TDP row disappearing, taking AutoTDP ("No primary power limit is
+    /// available to control") with it.
+    /// </remarks>
+    private static readonly TimeSpan ObservationInterval = TimeSpan.FromSeconds(10);
 
     /// <summary>Creates the production plugin with Windows hardware transports.</summary>
     public Claw8A2VmPlugin()
@@ -183,6 +196,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 cancellationToken).ConfigureAwait(false);
             _active = true;
             await PublishCapabilityStatesAsync(cancellationToken).ConfigureAwait(false);
+            StartObservationLoop();
             return CurrentStartResult();
         }
         catch
@@ -257,6 +271,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         }
 
         _quiescing = true;
+        StopObservationLoop();
         await _commandSerializer.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -314,6 +329,10 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 .ConfigureAwait(false);
             _quiescing = false;
             await PublishCapabilityStatesAsync(cancellationToken).ConfigureAwait(false);
+
+            // Resume rebuilds the capability surface, so the observation loop has to come back with
+            // it — a resumed cycle that never refreshed would go stale exactly as the original did.
+            StartObservationLoop();
             return CurrentStartResult();
         }
         finally
@@ -447,6 +466,10 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     {
         ArgumentNullException.ThrowIfNull(context);
         _quiescing = true;
+
+        // Before taking the gate: the loop takes the same one, and a refresh must not be able to
+        // read hardware the stop is releasing.
+        StopObservationLoop();
         await _commandSerializer.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -483,6 +506,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         }
 
         _disposed = true;
+        StopObservationLoop();
         if (_active)
         {
             await StopAsync(
@@ -755,7 +779,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         IReadOnlyList<CapabilityDescriptor> descriptors =
         [
             IntegerDescriptor(CapabilityIds.PowerSustained, CapabilityRole.PowerSustainedLimit,
-                DisplayKey.SustainedPowerLimit, 8, 30, CapabilityUnit.Watt, writable: true),
+                // 37 W, matching PL2 and the device's actual ceiling, not the 30 W it ships at.
+                DisplayKey.SustainedPowerLimit, 8, 37, CapabilityUnit.Watt, writable: true),
             IntegerDescriptor(CapabilityIds.PowerBoost, CapabilityRole.PowerSlowLimit,
                 DisplayKey.BoostPowerLimit, 8, 37, CapabilityUnit.Watt, writable: true),
             ChoiceDescriptor(
@@ -1400,6 +1425,106 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         ClawServiceState.Idle or ClawServiceState.Passive or ClawServiceState.Acquiring => "device",
         _ => "unavailable",
     };
+
+    /// <summary>Starts the periodic observation refresh for this cycle.</summary>
+    private void StartObservationLoop()
+    {
+        StopObservationLoop();
+        CancellationTokenSource loop = new();
+        _observationLoop = loop;
+        _observationTask = Task.Run(() => ObservationLoopAsync(loop.Token));
+    }
+
+    /// <summary>Stops and forgets the observation loop, if one is running.</summary>
+    private void StopObservationLoop()
+    {
+        CancellationTokenSource? loop = _observationLoop;
+        _observationLoop = null;
+        _observationTask = null;
+        if (loop is null)
+        {
+            return;
+        }
+
+        try
+        {
+            loop.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Already torn down by a concurrent stop; nothing left to cancel.
+        }
+
+        loop.Dispose();
+    }
+
+    /// <summary>Re-reads the hardware and republishes state until the cycle ends.</summary>
+    /// <param name="cancellationToken">Ends the loop when the cycle does.</param>
+    /// <remarks>
+    /// Serialized behind the same gate as commands, so a refresh can never interleave with a
+    /// hardware write. Failures are traced and the loop continues: a device that cannot be read for
+    /// one interval is a stale reading, which WSGM already models, not a reason to stop observing.
+    /// </remarks>
+    private async Task ObservationLoopAsync(CancellationToken cancellationToken)
+    {
+        using PeriodicTimer timer = new(ObservationInterval);
+        while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (!_active || _quiescing || _disposed)
+            {
+                continue;
+            }
+
+            if (!await _commandSerializer.WaitAsync(TimeSpan.FromSeconds(2), cancellationToken)
+                .ConfigureAwait(false))
+            {
+                // A command is in flight and will republish on its own; skipping is correct.
+                continue;
+            }
+
+            try
+            {
+                await RefreshAllObservedAsync(cancellationToken).ConfigureAwait(false);
+                await PublishCapabilityStatesAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                PluginTrace.Failure("observe", "periodic observation refresh failed", ex);
+            }
+            finally
+            {
+                _commandSerializer.Release();
+            }
+        }
+    }
+
+    /// <summary>Re-reads every observable service that is currently owned.</summary>
+    private async ValueTask RefreshAllObservedAsync(CancellationToken cancellationToken)
+    {
+        if (_power is { State: ClawServiceState.Owned })
+        {
+            await _power.RefreshAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (_fans is { State: ClawServiceState.Owned })
+        {
+            await _fans.RefreshAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (_telemetry is { State: ClawServiceState.Owned })
+        {
+            await _telemetry.RefreshAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (_lighting is { State: ClawServiceState.Owned })
+        {
+            await _lighting.RefreshAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
 
     private async ValueTask RefreshObservedAsync(
         string capabilityId,

@@ -35,10 +35,17 @@ internal sealed class ClawA2VmPowerCapability(IMsiWmiTransport transport)
         CancellationToken cancellationToken)
     {
         PowerPair before = await ReadAsync(cancellationToken).ConfigureAwait(false);
-        if (watts is < 8 or > 30 || before.BoostWatts < watts || before.BoostWatts > 37)
+
+        // PL1's ceiling is the same 37 W as PL2, raised from 30 W on the maintainer's instruction
+        // for the A2VM. `_plan/claw-8-a2vm-plugin.md` recorded 8-30 W for EC 0x50 from the stock
+        // read, which is the value the firmware ships with rather than the range it accepts.
+        // ApplyPairCoreAsync reads the pair back and only reports success when the hardware took
+        // the value, so a ceiling the EC actually refuses surfaces as a failed command rather than
+        // a silent lie.
+        if (watts is < 8 or > 37 || before.BoostWatts < watts || before.BoostWatts > 37)
         {
             return Rejected(command, CapabilityReasonCode.ValueOutOfRange,
-                "PL1 must be 8-30 W and cannot exceed the current PL2 value.");
+                "PL1 must be 8-37 W and cannot exceed the current PL2 value.");
         }
 
         return await ApplyPairCoreAsync(command, before, watts, before.BoostWatts, cancellationToken)
