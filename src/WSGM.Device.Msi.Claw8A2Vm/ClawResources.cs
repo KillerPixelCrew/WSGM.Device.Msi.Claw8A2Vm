@@ -533,10 +533,15 @@ internal sealed class ControllerService(
 
         if (_current.PhysicalDevices.Count == 0)
         {
+            // Captured before the restore, which clears _current: the whole point of this reason is
+            // to say what was observed, and reading it afterwards is reading nothing.
+            string detail = "No exact DirectInput physical interface identity was available for "
+                + $"handoff. Mode={_current.Mode}, product={_current.ProductId}, "
+                + $"endpoints=[{_current.ObservedEndpoints}]";
             await RestoreAfterFailedAcquireAsync(context.Deadline).ConfigureAwait(false);
             return Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.PrerequisiteMissing,
-                "No exact DirectInput physical interface identity was available for handoff."));
+                detail));
         }
 
         try

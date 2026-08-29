@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -504,11 +505,25 @@ internal static class HidEndpointEnumerator
         && endpoint.InputLength == 64
         && endpoint.OutputLength == 64);
 
+    /// <summary>The interface controller reports arrive on while the MCU is in DirectInput mode.</summary>
+    /// <returns>The endpoint, or null when the device is not in that mode.</returns>
+    /// <remarks>
+    /// The vendor MCU pipe, not a HID game controller. Device-observed on the reference Claw
+    /// (MS-1T52, firmware 0229, 2026-08-29): in DirectInput mode the device presents FFF0:0040
+    /// in64/out64 plus a keyboard, a mouse and a consumer control, and nothing with usage 0001:0005.
+    /// Looking for a game controller here found nothing and failed the acquisition with
+    /// FileNotFoundException immediately after the mode switch had succeeded.
+    /// <para>
+    /// The 64-byte input and output lengths are part of the match rather than decoration: they are
+    /// what distinguishes the report pipe from the other vendor collections.
+    /// </para>
+    /// </remarks>
     public static HidEndpoint? FindDirectInputGamepad() => Enumerate().FirstOrDefault(endpoint =>
         endpoint.ProductId == ClawHardwareFacts.DirectInputProductId
-        && endpoint.UsagePage == 0x0001
-        && endpoint.Usage == 0x0005
-        && endpoint.InputLength == 64);
+        && endpoint.UsagePage == 0xFFF0
+        && endpoint.Usage == 0x0040
+        && endpoint.InputLength == 64
+        && endpoint.OutputLength == 64);
 
     public static ControllerTopology? DiscoverControllerTopology()
     {
@@ -528,12 +543,34 @@ internal static class HidEndpointEnumerator
             ClawControllerMode mode = mcu.ProductId == ClawHardwareFacts.XInputProductId
                 ? ClawControllerMode.XInput
                 : ClawControllerMode.DirectInput;
+            // What carries controller input differs by mode, so the rule has to.
+            //
+            // In XInput mode the pad is a real HID game controller on an &IG_ interface, and that is
+            // what other software reads.
+            //
+            // In DirectInput mode there is no game controller interface at all. Device-observed on
+            // the reference Claw (MS-1T52, firmware 0229, 2026-08-29): after the switch the device
+            // presents FFF0:0040 in64/out64 — the vendor MCU pipe — plus a keyboard, a mouse and a
+            // consumer control, and nothing with usage 0001:0005. MSI's "DirectInput" is a vendor
+            // report mode, not a DirectInput gamepad.
+            //
+            // Requiring a game controller therefore found nothing to hand off in the very mode the
+            // plugin had just switched into, rolled the switch back, and left controller ownership
+            // permanently Passive. In that mode the MCU pipe IS the controller, so it is what WSGM
+            // hides. The keyboard, mouse and consumer collections are deliberately left alone, for
+            // the same reason the XInput branch leaves the MI_02 collections alone: they are the
+            // device's extra buttons, not a second copy of the pad.
             IReadOnlyList<PhysicalDeviceIdentity> physical = endpoints
                 .Where(endpoint =>
                     endpoint.ProductId == mcu.ProductId
                     && SamePhysicalLocation(endpoint.PhysicalLocation, mcu.PhysicalLocation)
                     && (endpoint.InstancePath.Contains("&IG_", StringComparison.OrdinalIgnoreCase)
-                        || (endpoint.UsagePage == 0x0001 && endpoint.Usage == 0x0005)))
+                        || (endpoint.UsagePage == 0x0001 && endpoint.Usage == 0x0005)
+                        || (mode is ClawControllerMode.DirectInput
+                            && endpoint.UsagePage == 0xFFF0
+                            && endpoint.Usage == 0x0040
+                            && endpoint.InputLength == 64
+                            && endpoint.OutputLength == 64)))
                 .Select(endpoint => new PhysicalDeviceIdentity
                 {
                     InstancePath = endpoint.InstancePath,
@@ -543,7 +580,21 @@ internal static class HidEndpointEnumerator
                     RequiresHiding = true,
                 })
                 .ToArray();
-            return new ControllerTopology(mode, mcu.ProductId, mcu.PhysicalLocation, physical);
+            // Summarized here, where the endpoints are still alive, because they are disposed in the
+            // finally below and a failed handoff otherwise has nothing to report but its own
+            // absence.
+            string observed = string.Join(", ", endpoints
+                .Where(endpoint => SamePhysicalLocation(endpoint.PhysicalLocation, mcu.PhysicalLocation))
+                .Select(endpoint => string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{endpoint.ProductId}/{endpoint.UsagePage:X4}:{endpoint.Usage:X4} in{endpoint.InputLength} out{endpoint.OutputLength}"))
+                .Take(16));
+            return new ControllerTopology(
+                mode,
+                mcu.ProductId,
+                mcu.PhysicalLocation,
+                physical,
+                observed);
         }
         finally
         {

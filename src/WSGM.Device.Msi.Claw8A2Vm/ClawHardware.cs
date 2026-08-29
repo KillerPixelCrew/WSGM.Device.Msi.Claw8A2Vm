@@ -73,11 +73,22 @@ internal sealed record LightingState(
     int LeftRingColor,
     int ButtonsColor);
 
+/// <summary>The controller interfaces observed at one moment, and what they looked like.</summary>
+/// <param name="Mode">The mode the MCU reports.</param>
+/// <param name="ProductId">The USB product id the MCU enumerated as.</param>
+/// <param name="PhysicalLocation">Composite USB location shared by the interfaces.</param>
+/// <param name="PhysicalDevices">Interfaces WSGM may hide, which is the set the handoff needs.</param>
+/// <param name="ObservedEndpoints">
+/// Every candidate endpoint seen at this location, as "productId/usagePage:usage in/out". Carried so
+/// a failed handoff can say what it actually found rather than only that it found nothing — a plugin
+/// has no logging channel of its own, so a reason string is the only way this reaches a log.
+/// </param>
 internal sealed record ControllerTopology(
     ClawControllerMode Mode,
     string ProductId,
     string PhysicalLocation,
-    IReadOnlyList<PhysicalDeviceIdentity> PhysicalDevices);
+    IReadOnlyList<PhysicalDeviceIdentity> PhysicalDevices,
+    string ObservedEndpoints = "");
 
 internal interface IClawIdentityReader
 {

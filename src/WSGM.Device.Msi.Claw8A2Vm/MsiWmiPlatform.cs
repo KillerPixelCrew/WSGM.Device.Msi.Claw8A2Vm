@@ -227,9 +227,22 @@ internal sealed class WindowsClawIdentityReader(IMsiWmiTransport wmi) : IClawIde
                 byte[] ec = await _wmi.InvokeGetterAsync("Get_EC", 0, cancellationToken)
                     .ConfigureAwait(false);
                 ecFirmware = DecodeEcFirmware(ec);
+
+                // Prefix, not equality. The EC returns its version with its build stamp appended and
+                // no separator between them, so the whole field reads
+                // "1T52EMS1.1091204202509:10:47" — the version followed by 12/04/2025 09:10:47.
+                // Comparing the entire field to the version could never match, which failed the WMI
+                // firmware gate and left every power, fan, thermal and lighting capability
+                // unavailable while the device reported itself only partly available.
+                // Device-observed on the reference Claw, 2026-08-29; the raw response is recorded in
+                // docs/device-integration.md.
+                //
+                // The full field is still what the snapshot carries, because the build stamp is
+                // exactly the sort of thing a remote diagnosis needs and nothing else records it.
                 wmiFirmwareVerified = wmiVersion[2] == 8
                     && wmiVersion[3] == 0
-                    && string.Equals(ecFirmware, ClawHardwareFacts.EcFirmware, StringComparison.OrdinalIgnoreCase);
+                    && ecFirmware is not null
+                    && ecFirmware.StartsWith(ClawHardwareFacts.EcFirmware, StringComparison.OrdinalIgnoreCase);
             }
         }
         catch (Exception ex) when (ex is ManagementException or IOException or UnauthorizedAccessException
