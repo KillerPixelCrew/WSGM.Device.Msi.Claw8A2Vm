@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using WSGM.Device.Sdk.Identity;
+using WSGM.Device.Sdk.Plugin;
 
 namespace WSGM.Device.Msi.Claw8A2Vm;
 
@@ -248,6 +249,9 @@ internal sealed class WindowsClawIdentityReader(IMsiWmiTransport wmi) : IClawIde
         catch (Exception ex) when (ex is ManagementException or IOException or UnauthorizedAccessException
             || (ex is OperationCanceledException && !cancellationToken.IsCancellationRequested))
         {
+            // A permissions refusal, a missing instance and a malformed response all became this
+            // one flag, and all three reached the user as the same partially-available device.
+            PluginTrace.Failure("wmi", "MSI_ACPI provider probe failed", ex);
             providerAvailable = false;
         }
 
@@ -438,8 +442,11 @@ internal sealed class MsiOemEventSource : IMsiOemEventSource
                 _watcher.Start();
                 return ValueTask.FromResult(true);
             }
-            catch
+            catch (Exception ex) when (ex is not OutOfMemoryException)
             {
+                // Returning false here takes the whole OEM-events service to Passive. Without this
+                // line the log showed a device that was partially available and never why.
+                PluginTrace.Failure("wmi", "MSI_Event subscription could not start", ex);
                 _watcher.EventArrived -= OnEventArrived;
                 _watcher.Dispose();
                 _watcher = null;

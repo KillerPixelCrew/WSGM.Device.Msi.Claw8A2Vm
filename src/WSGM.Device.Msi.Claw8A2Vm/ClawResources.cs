@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using WSGM.Device.Sdk.Capabilities;
 using WSGM.Device.Sdk.Input;
+using WSGM.Device.Sdk.Ipc;
 using WSGM.Device.Sdk.Lifecycle;
 using WSGM.Device.Sdk.Plugin;
 
@@ -488,12 +489,32 @@ internal sealed class ControllerService(
         ClawIdentityState identity = await _identity.ReadAsync(cancellationToken).ConfigureAwait(false);
         if (!identity.ExactMachineMatch || !identity.McuFirmwareVerified)
         {
+            _host.Trace(
+                DeviceTraceLevel.Warn,
+                "controller",
+                "acquire refused at the identity gate: "
+                    + $"exactMachine={identity.ExactMachineMatch}, "
+                    + $"mcuVerified={identity.McuFirmwareVerified}.");
             return Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.FirmwareNotVerified,
                 "Controller ownership is gated to exact MS-1T52 firmware 0x0229."));
         }
 
         ControllerTopology? observed = await _source.DiscoverAsync(cancellationToken).ConfigureAwait(false);
+
+        // Discovery is where the answer to "why didn't it switch to DirectInput?" lives, and it was
+        // invisible: the mode, the product id and the endpoint list are all decided here and none
+        // of them survived into any reason string. Traced unconditionally, before the gates below
+        // get a chance to turn all of it into one sentence about a prerequisite.
+        _host.Trace(
+            observed is null ? DeviceTraceLevel.Warn : DeviceTraceLevel.Info,
+            "controller",
+            observed is null
+                ? "discovery found no Claw controller topology."
+                : $"discovered mode={observed.Mode}, product=0x{observed.ProductId:X4}, "
+                    + $"location='{observed.PhysicalLocation}', "
+                    + $"physicalDevices={observed.PhysicalDevices.Count}, "
+                    + $"endpoints=[{observed.ObservedEndpoints}]");
         _original ??= observed;
         if (_original is null || observed is null
             || string.IsNullOrWhiteSpace(_original.PhysicalLocation)
@@ -501,6 +522,12 @@ internal sealed class ControllerService(
                 observed.PhysicalLocation,
                 _original.PhysicalLocation))
         {
+            _host.Trace(
+                DeviceTraceLevel.Warn,
+                "controller",
+                "acquire refused: composite USB location did not match the one first observed. "
+                    + $"original='{_original?.PhysicalLocation}', "
+                    + $"observed='{observed?.PhysicalLocation}'.");
             return Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.PrerequisiteMissing,
                 "The physical controller or its composite USB location was unavailable."));
@@ -516,6 +543,10 @@ internal sealed class ControllerService(
                 ClawFirmwareIdentities.Mcu,
                 ClawRecoveryValues.ControllerMode(_original.Mode),
                 cancellationToken).ConfigureAwait(false);
+            _host.Trace(
+                DeviceTraceLevel.Info,
+                "controller",
+                $"switching MCU mode {_current.Mode} -> DirectInput at '{_original.PhysicalLocation}'.");
             try
             {
                 _current = await _mcu.SwitchModeAsync(
@@ -524,11 +555,34 @@ internal sealed class ControllerService(
                     context.Deadline,
                     cancellationToken).ConfigureAwait(false);
             }
-            catch
+            catch (Exception ex)
             {
+                _host.Trace(
+                    DeviceTraceLevel.Error,
+                    "controller",
+                    $"mode switch to DirectInput failed: {ex.GetType().Name}: {ex.Message}");
                 await RestoreAfterFailedAcquireAsync(context.Deadline).ConfigureAwait(false);
                 throw;
             }
+
+            // The switch reports success by returning a topology, but the topology is what the
+            // hardware actually settled into. Those differed on the reference unit, and nothing
+            // said so.
+            _host.Trace(
+                _current.Mode is ClawControllerMode.DirectInput
+                    ? DeviceTraceLevel.Info
+                    : DeviceTraceLevel.Warn,
+                "controller",
+                $"mode switch settled at {_current.Mode}, product=0x{_current.ProductId:X4}, "
+                    + $"physicalDevices={_current.PhysicalDevices.Count}, "
+                    + $"endpoints=[{_current.ObservedEndpoints}]");
+        }
+        else
+        {
+            _host.Trace(
+                DeviceTraceLevel.Info,
+                "controller",
+                "controller already in DirectInput; no mode switch needed.");
         }
 
         if (_current.PhysicalDevices.Count == 0)
@@ -538,6 +592,7 @@ internal sealed class ControllerService(
             string detail = "No exact DirectInput physical interface identity was available for "
                 + $"handoff. Mode={_current.Mode}, product={_current.ProductId}, "
                 + $"endpoints=[{_current.ObservedEndpoints}]";
+            _host.Trace(DeviceTraceLevel.Warn, "controller", detail);
             await RestoreAfterFailedAcquireAsync(context.Deadline).ConfigureAwait(false);
             return Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.PrerequisiteMissing,
@@ -551,8 +606,12 @@ internal sealed class ControllerService(
                 PublishControllerSampleAsync,
                 cancellationToken).ConfigureAwait(false);
         }
-        catch
+        catch (Exception ex)
         {
+            _host.Trace(
+                DeviceTraceLevel.Error,
+                "controller",
+                $"reader failed to start on the DirectInput pad: {ex.GetType().Name}: {ex.Message}");
             await RestoreAfterFailedAcquireAsync(context.Deadline).ConfigureAwait(false);
             throw;
         }
@@ -561,6 +620,11 @@ internal sealed class ControllerService(
             _current.PhysicalDevices,
             OutputCapabilities,
             cancellationToken).ConfigureAwait(false);
+        _host.Trace(
+            DeviceTraceLevel.Info,
+            "controller",
+            $"owned: published {_current.PhysicalDevices.Count} physical identities for hiding, "
+                + $"haptics={OutputCapabilities is not null}.");
         return Set(ClawServiceState.Owned);
     }
 

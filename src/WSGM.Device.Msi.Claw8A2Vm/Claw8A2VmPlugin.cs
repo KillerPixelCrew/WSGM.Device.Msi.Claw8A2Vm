@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using WSGM.Device.Sdk.Capabilities;
 using WSGM.Device.Sdk.Input;
+using WSGM.Device.Sdk.Ipc;
 using WSGM.Device.Sdk.Lifecycle;
 using WSGM.Device.Sdk.Plugin;
 
@@ -94,9 +96,17 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             throw new InvalidOperationException("DeviceHost supplied an inconsistent cycle generation.");
         }
 
+        // Installed before the first hardware read, because startup is when the failures worth
+        // tracing happen and an ambient sink installed late traces nothing that mattered.
+        PluginTrace.Install(context.Host);
+        PluginTrace.Info(
+            "lifecycle",
+            $"start: definition={context.DeviceDefinitionId}, cycle={context.CycleGeneration}.");
+
         ClawIdentityState identity = await _services.Identity.ReadAsync(cancellationToken).ConfigureAwait(false);
         if (!identity.ExactMachineMatch)
         {
+            PluginTrace.Error("lifecycle", "the exact MS-1T52 activation gate no longer matches.");
             throw new InvalidOperationException("The exact MS-1T52 activation gate no longer matches.");
         }
 
@@ -1630,7 +1640,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         bool unhealthy = _serviceStatuses.Any(service => service.State is not ClawServiceState.Owned);
         ClawServiceStatus? firstUnhealthy = _serviceStatuses.FirstOrDefault(
             service => service.State is not ClawServiceState.Owned);
-        return new PluginStartResult
+        PluginStartResult result = new()
         {
             State = owned == 0
                 ? PluginOperationalState.Passive
@@ -1641,6 +1651,50 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                     "No Claw hardware service could be acquired.")
                 : null),
         };
+
+        // "Degraded" names the aggregate and carries only the FIRST unhealthy service's reason,
+        // which is what made "why is the device only partially available?" unanswerable from a
+        // pasted log: the state that reached the user described one service out of eight and never
+        // said which of the others were fine. This lists all of them, every time.
+        TraceServiceStates(result.State);
+        return result;
+    }
+
+    /// <summary>Records the state of every service behind one aggregate operational state.</summary>
+    private void TraceServiceStates(PluginOperationalState aggregate)
+    {
+        if (_host is null)
+        {
+            return;
+        }
+
+        StringBuilder detail = new();
+        foreach (ClawServiceStatus service in _serviceStatuses)
+        {
+            if (detail.Length > 0)
+            {
+                detail.Append(", ");
+            }
+
+            detail.Append(service.ServiceId).Append('=').Append(service.State);
+            if (service.State is not ClawServiceState.Owned && service.Reason is { } reason)
+            {
+                detail.Append('(').Append(reason.Code);
+                if (!string.IsNullOrWhiteSpace(reason.Detail))
+                {
+                    detail.Append(": ").Append(reason.Detail);
+                }
+
+                detail.Append(')');
+            }
+        }
+
+        _host.Trace(
+            aggregate is PluginOperationalState.Active
+                ? DeviceTraceLevel.Info
+                : DeviceTraceLevel.Warn,
+            "lifecycle",
+            $"start state {aggregate}: {detail}");
     }
 
     private PluginStopResult CurrentStopResult()
