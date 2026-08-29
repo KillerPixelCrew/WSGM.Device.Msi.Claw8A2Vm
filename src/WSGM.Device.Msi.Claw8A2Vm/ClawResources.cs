@@ -552,8 +552,10 @@ internal sealed class ControllerService(
             throw;
         }
 
-        await _host.PublishPhysicalDevicesAsync(_current.PhysicalDevices, cancellationToken)
-            .ConfigureAwait(false);
+        await _host.PublishPhysicalDevicesAsync(
+            _current.PhysicalDevices,
+            OutputCapabilities,
+            cancellationToken).ConfigureAwait(false);
         return Set(ClawServiceState.Owned);
     }
 
@@ -670,6 +672,24 @@ internal sealed class ControllerService(
             cancellationToken).ConfigureAwait(false);
         return ControllerHandoffResult.ReleasedVerified;
     }
+
+    /// <summary>
+    /// What the Claw's MCU can actually do with output.
+    /// </summary>
+    /// <remarks>
+    /// Two motors and no trigger haptics: the rumble report
+    /// (<see cref="ClawControllerCodec.EncodeRumble"/>) carries one weak and one strong byte and
+    /// nothing else. The frame rate matches this service's own 4 ms write gate below, so WSGM's
+    /// output router paces frames instead of the plugin dropping them after they crossed the pipe.
+    /// </remarks>
+    private static readonly HapticCapabilities OutputCapabilities = new()
+    {
+        LowFrequency = OutputChannelSupport.Native,
+        HighFrequency = OutputChannelSupport.Native,
+        LeftTrigger = OutputChannelSupport.Unsupported,
+        RightTrigger = OutputChannelSupport.Unsupported,
+        MaxFramesPerSecond = 250,
+    };
 
     public async ValueTask ApplyHapticsAsync(
         HapticOutputFrame frame,
