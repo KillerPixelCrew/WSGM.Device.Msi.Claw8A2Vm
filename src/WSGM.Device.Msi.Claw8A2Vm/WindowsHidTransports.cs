@@ -255,8 +255,11 @@ internal sealed class WindowsClawMcuTransport : IClawMcuTransport
     }
 }
 
-internal sealed class WindowsClawControllerSource : IClawControllerSource
+internal sealed class WindowsClawControllerSource(ClawOemButtonLatch oemButtons)
+    : IClawControllerSource
 {
+    private readonly ClawOemButtonLatch _oemButtons =
+        oemButtons ?? throw new ArgumentNullException(nameof(oemButtons));
     private readonly object _gate = new();
     private readonly SemaphoreSlim _writeSerializer = new(1, 1);
     private HidEndpoint? _endpoint;
@@ -437,7 +440,8 @@ internal sealed class WindowsClawControllerSource : IClawControllerSource
                 Interlocked.Increment(ref _sequence),
                 cycleGeneration,
                 DateTimeOffset.UtcNow,
-                quality);
+                quality,
+                _oemButtons);
             await publish(sample).ConfigureAwait(false);
             firstSample.TrySetResult();
         }

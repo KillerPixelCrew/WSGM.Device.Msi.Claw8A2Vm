@@ -6,6 +6,71 @@ using WSGM.Device.Sdk.Input;
 
 namespace WSGM.Device.Msi.Claw8A2Vm;
 
+/// <summary>
+/// Carries an OEM button press from the firmware's WMI event into the controller sample stream.
+/// </summary>
+/// <remarks>
+/// The Claw's two front buttons are physical controller buttons, and they belong on the virtual
+/// target as its Steam and Quick Access buttons — that is what they are printed for, and Steam
+/// answers its own controller natively. They were reaching WSGM as semantic OEM events and going no
+/// further, so the virtual Steam Deck had neither button: the controller configurator listed no
+/// such controls, nothing was bound to them, and no glyph could appear for a control Steam did not
+/// believe existed.
+/// <para>
+/// A latch is needed because the firmware does not put them in the DirectInput report at all. They
+/// arrive as MSI WMI events — one event per press, with no release — while samples are produced by
+/// the pad reader at about 125 Hz. Holding the bit for <see cref="HoldDuration"/> turns that single
+/// event into a press and a release the virtual pad can actually deliver.
+/// </para>
+/// </remarks>
+internal sealed class ClawOemButtonLatch
+{
+    /// <summary>How long a latched button stays down.</summary>
+    /// <remarks>
+    /// Long enough to survive a dropped or coalesced sample at the reader's rate, short enough to
+    /// stay a tap rather than becoming a long press in whatever is reading it.
+    /// </remarks>
+    internal static readonly TimeSpan HoldDuration = TimeSpan.FromMilliseconds(120);
+
+    private readonly object _gate = new();
+    private CanonicalButtons _held;
+    private DateTimeOffset _until;
+
+    /// <summary>Latches one button down for <see cref="HoldDuration"/>.</summary>
+    /// <param name="button">The canonical button the press maps to.</param>
+    /// <param name="now">Current time.</param>
+    internal void Press(CanonicalButtons button, DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            _held |= button;
+            _until = now + HoldDuration;
+        }
+    }
+
+    /// <summary>Returns the buttons that should be down in a sample taken now.</summary>
+    /// <param name="now">The sample's timestamp.</param>
+    /// <returns>The latched buttons, or none once the hold has elapsed.</returns>
+    internal CanonicalButtons Current(DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            if (_held == CanonicalButtons.None)
+            {
+                return CanonicalButtons.None;
+            }
+
+            if (now >= _until)
+            {
+                _held = CanonicalButtons.None;
+                return CanonicalButtons.None;
+            }
+
+            return _held;
+        }
+    }
+}
+
 internal static class ClawControllerCodec
 {
     public static CanonicalControllerSample Decode(
@@ -13,7 +78,8 @@ internal static class ClawControllerCodec
         long sequence,
         long cycleGeneration,
         DateTimeOffset timestamp,
-        SampleQuality quality = SampleQuality.Good)
+        SampleQuality quality = SampleQuality.Good,
+        ClawOemButtonLatch? oemButtons = null)
     {
         if (report.Length != 64 || report[0] != 0x01)
         {
@@ -36,6 +102,10 @@ internal static class ClawControllerCodec
         buttons |= IsSet(report[7], 4) ? CanonicalButtons.RearPaddle1 : 0;
         buttons |= IsSet(report[7], 3) ? CanonicalButtons.RearPaddle2 : 0;
         buttons |= DecodeHat(report[5] & 0x0F);
+
+        // The two front OEM buttons are not in this report — the firmware delivers them as WMI
+        // events — so they are merged in from the latch that receives those events.
+        buttons |= oemButtons?.Current(timestamp) ?? CanonicalButtons.None;
 
         return new CanonicalControllerSample
         {

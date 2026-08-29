@@ -135,7 +135,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         _lightingCapability = lightingCapability;
         _journal = await ClawRecoveryJournal.OpenAsync(context.StateDirectory, cancellationToken)
             .ConfigureAwait(false);
-        _oem = new OemEventService(_services.OemEvents, context.Host);
+        _oem = new OemEventService(_services.OemEvents, context.Host, _services.OemButtons);
         _power = new PowerService(_services.Identity, powerCapability, _journal);
         _fans = new FanService(_services.Identity, fanCapability, _journal);
         _telemetry = new TelemetryService(_services.Identity, fanCapability);
@@ -2079,14 +2079,20 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     private static ClawHardwareServices CreateWindowsServices()
     {
         MsiWmiPlatform wmi = new();
+
+        // One latch, shared by the two services that need it: the OEM event source latches a press
+        // and the controller reader merges it into the next samples. The buttons are physical
+        // controller buttons that the firmware happens to deliver out of band.
+        ClawOemButtonLatch oemButtons = new();
         return new ClawHardwareServices(
             new WindowsClawIdentityReader(wmi),
             wmi,
             new MsiOemEventSource(),
             new WindowsClawMcuTransport(),
-            new WindowsClawControllerSource(),
+            new WindowsClawControllerSource(oemButtons),
             new WindowsClawMotionSource(),
-            new FirmwareChordSuppressor());
+            new FirmwareChordSuppressor(),
+            oemButtons);
     }
 
     private delegate ValueTask<CapabilityCommandResult> ClawCommandHandler(

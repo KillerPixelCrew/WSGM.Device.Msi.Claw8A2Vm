@@ -179,4 +179,5 @@ internal sealed record ClawHardwareServices(
     IClawMcuTransport Mcu,
     IClawControllerSource Controller,
     IClawMotionSource Motion,
-    IFirmwareChordSuppressor ChordSuppressor);
+    IFirmwareChordSuppressor ChordSuppressor,
+    ClawOemButtonLatch OemButtons);

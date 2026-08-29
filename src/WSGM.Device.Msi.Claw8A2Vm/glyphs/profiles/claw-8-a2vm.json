@@ -134,16 +134,16 @@
       "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
     },
     {
-      "sha256": "65cdfe5269d3a8fc3ea304f39faf91823fa71be2beea873f83d591fa0a319110",
+      "sha256": "900da473c57f2a93e13abf052c1e28c750f1bd24eb36a927d49c602620bc59c3",
       "format": "Svg",
-      "byteCount": 661,
+      "byteCount": 697,
       "role": "Control",
       "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
     },
     {
-      "sha256": "7b5cdbe3ac0238444c223b0ea5a0d9e9fddd7815e99c8a8742ed86a5baec038b",
+      "sha256": "a2cffecd5586a3a68c656ca75cf287f8128519458cff9bd5ad94e3fb9f5f0b7b",
       "format": "Svg",
-      "byteCount": 1250,
+      "byteCount": 1230,
       "role": "Control",
       "viewBox": { "x": 0, "y": 0, "width": 32, "height": 32 }
     },
@@ -285,19 +285,17 @@
     {
       "control": "RearM1",
       "presence": "Present",
-      "side": "Right",
+      "side": "Left",
       "physicalLabel": "M1",
-      "assetSha256": "65cdfe5269d3a8fc3ea304f39faf91823fa71be2beea873f83d591fa0a319110"
+      "assetSha256": "900da473c57f2a93e13abf052c1e28c750f1bd24eb36a927d49c602620bc59c3"
     },
     {
       "control": "RearM2",
       "presence": "Present",
-      "side": "Left",
+      "side": "Right",
       "physicalLabel": "M2",
-      "assetSha256": "7b5cdbe3ac0238444c223b0ea5a0d9e9fddd7815e99c8a8742ed86a5baec038b"
-    },
-    { "control": "LeftStickTouch", "presence": "Absent" },
-    { "control": "RightStickTouch", "presence": "Absent" }
+      "assetSha256": "a2cffecd5586a3a68c656ca75cf287f8128519458cff9bd5ad94e3fb9f5f0b7b"
+    }
   ],
   "aliases": []
 }

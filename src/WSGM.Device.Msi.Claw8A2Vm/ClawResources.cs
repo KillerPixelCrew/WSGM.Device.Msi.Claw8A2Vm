@@ -74,10 +74,13 @@ internal abstract class ClawServiceStatus(string serviceId)
 
 internal sealed class OemEventService(
     IMsiOemEventSource source,
-    IPluginHostAdapter host) : ClawServiceStatus(ServiceIds.OemEvents)
+    IPluginHostAdapter host,
+    ClawOemButtonLatch oemButtons) : ClawServiceStatus(ServiceIds.OemEvents)
 {
     private readonly IMsiOemEventSource _source = source ?? throw new ArgumentNullException(nameof(source));
     private readonly IPluginHostAdapter _host = host ?? throw new ArgumentNullException(nameof(host));
+    private readonly ClawOemButtonLatch _oemButtons =
+        oemButtons ?? throw new ArgumentNullException(nameof(oemButtons));
     private long _cycleGeneration;
 
     public async ValueTask<ClawServiceResult> AcquireAsync(
@@ -125,6 +128,21 @@ internal sealed class OemEventService(
         if (mapped is null)
         {
             return ValueTask.CompletedTask;
+        }
+
+        // The buttons the device is printed for: the left one is the virtual target's Steam button,
+        // the right one its Quick Access button. Latched into the controller sample so Steam sees
+        // its own controller press them, rather than WSGM acting on the user's behalf. A long press
+        // on OEM2 is still only that button — the duration belongs to whatever reads it.
+        CanonicalButtons button = mapped.Value.controlId switch
+        {
+            "oem1" => CanonicalButtons.Guide,
+            "oem2" => CanonicalButtons.QuickAccess,
+            _ => CanonicalButtons.None,
+        };
+        if (button != CanonicalButtons.None)
+        {
+            _oemButtons.Press(button, timestamp);
         }
 
         return _host.PublishOemEventAsync(
