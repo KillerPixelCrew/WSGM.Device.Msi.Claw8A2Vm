@@ -505,25 +505,23 @@ internal static class HidEndpointEnumerator
         && endpoint.InputLength == 64
         && endpoint.OutputLength == 64);
 
-    /// <summary>The interface controller reports arrive on while the MCU is in DirectInput mode.</summary>
-    /// <returns>The endpoint, or null when the device is not in that mode.</returns>
+    /// <summary>The DirectInput pad the MCU presents after switching to that mode.</summary>
+    /// <returns>The endpoint, or null when it cannot be found.</returns>
     /// <remarks>
-    /// The vendor MCU pipe, not a HID game controller. Device-observed on the reference Claw
-    /// (MS-1T52, firmware 0229, 2026-08-29): in DirectInput mode the device presents FFF0:0040
-    /// in64/out64 plus a keyboard, a mouse and a consumer control, and nothing with usage 0001:0005.
-    /// Looking for a game controller here found nothing and failed the acquisition with
-    /// FileNotFoundException immediately after the mode switch had succeeded.
+    /// Currently always null on the reference Claw, and the reason is <see cref="Enumerate"/> rather
+    /// than this predicate — see the note in <see cref="DiscoverControllerTopology"/>. Windows does
+    /// list the pad (HID\VID_0DB0&amp;PID_1902&amp;MI_00&amp;COL01, "HID-compliant game controller"),
+    /// so this returning null means the enumeration did not surface a collection that exists.
     /// <para>
-    /// The 64-byte input and output lengths are part of the match rather than decoration: they are
-    /// what distinguishes the report pipe from the other vendor collections.
+    /// Do not repoint this at the vendor pipe to make it non-null. That was tried and measured: the
+    /// pipe delivered no input over eight seconds of real use and answers only commands.
     /// </para>
     /// </remarks>
     public static HidEndpoint? FindDirectInputGamepad() => Enumerate().FirstOrDefault(endpoint =>
         endpoint.ProductId == ClawHardwareFacts.DirectInputProductId
-        && endpoint.UsagePage == 0xFFF0
-        && endpoint.Usage == 0x0040
-        && endpoint.InputLength == 64
-        && endpoint.OutputLength == 64);
+        && endpoint.UsagePage == 0x0001
+        && endpoint.Usage == 0x0005
+        && endpoint.InputLength == 64);
 
     public static ControllerTopology? DiscoverControllerTopology()
     {
@@ -543,34 +541,24 @@ internal static class HidEndpointEnumerator
             ClawControllerMode mode = mcu.ProductId == ClawHardwareFacts.XInputProductId
                 ? ClawControllerMode.XInput
                 : ClawControllerMode.DirectInput;
-            // What carries controller input differs by mode, so the rule has to.
+            // NOTE (device-observed, reference Claw MS-1T52 firmware 0229, 2026-08-29): in
+            // DirectInput mode this finds nothing, and the cause is Enumerate() below rather than
+            // this rule. The DirectInput pad genuinely exists — Windows lists
+            // HID\VID_0DB0&PID_1902&MI_00&COL01 as a HID game controller — but it never comes back
+            // from the HID interface enumeration, which returns only MI_01's keyboard, mouse and
+            // consumer collections plus MI_00&COL02's vendor pipe.
             //
-            // In XInput mode the pad is a real HID game controller on an &IG_ interface, and that is
-            // what other software reads.
-            //
-            // In DirectInput mode there is no game controller interface at all. Device-observed on
-            // the reference Claw (MS-1T52, firmware 0229, 2026-08-29): after the switch the device
-            // presents FFF0:0040 in64/out64 — the vendor MCU pipe — plus a keyboard, a mouse and a
-            // consumer control, and nothing with usage 0001:0005. MSI's "DirectInput" is a vendor
-            // report mode, not a DirectInput gamepad.
-            //
-            // Requiring a game controller therefore found nothing to hand off in the very mode the
-            // plugin had just switched into, rolled the switch back, and left controller ownership
-            // permanently Passive. In that mode the MCU pipe IS the controller, so it is what WSGM
-            // hides. The keyboard, mouse and consumer collections are deliberately left alone, for
-            // the same reason the XInput branch leaves the MI_02 collections alone: they are the
-            // device's extra buttons, not a second copy of the pad.
+            // Two things were ruled out by measurement rather than argument. It is not a
+            // re-enumeration race: the mode switch settles in ~1.6 s and the set is unchanged after
+            // 12 s. And the vendor pipe is not a substitute source: reading it for 8 s while the
+            // device was being used produced no input at all, only a command response, so it is a
+            // command channel and hiding it would hide the wrong device.
             IReadOnlyList<PhysicalDeviceIdentity> physical = endpoints
                 .Where(endpoint =>
                     endpoint.ProductId == mcu.ProductId
                     && SamePhysicalLocation(endpoint.PhysicalLocation, mcu.PhysicalLocation)
                     && (endpoint.InstancePath.Contains("&IG_", StringComparison.OrdinalIgnoreCase)
-                        || (endpoint.UsagePage == 0x0001 && endpoint.Usage == 0x0005)
-                        || (mode is ClawControllerMode.DirectInput
-                            && endpoint.UsagePage == 0xFFF0
-                            && endpoint.Usage == 0x0040
-                            && endpoint.InputLength == 64
-                            && endpoint.OutputLength == 64)))
+                        || (endpoint.UsagePage == 0x0001 && endpoint.Usage == 0x0005)))
                 .Select(endpoint => new PhysicalDeviceIdentity
                 {
                     InstancePath = endpoint.InstancePath,
