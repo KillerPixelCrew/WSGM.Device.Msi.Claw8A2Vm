@@ -128,11 +128,27 @@ internal sealed class MsiWmiPlatform : IMsiWmiTransport
     {
         using ManagementObject instance = FindActiveInstance()
             ?? throw new FileNotFoundException("The reviewed MSI_ACPI instance was not present.");
-        using ManagementBaseObject input = instance.GetMethodParameters(methodName);
+
+        // Null means the method takes no in-parameters, which is not an error and not a missing
+        // instance: on the A2VM's firmware `Get_WMI`, `Get_EC`, `Get_EC2` and `GetPackage` are all
+        // declared `IN[] OUT[Instance Data]`, while every addressed accessor takes the package.
+        // Assigning `input["Data"]` unconditionally therefore threw a NullReferenceException on the
+        // very first call of the identity check, and the whole device cycle faulted behind it.
+        // Device-verified on the reference Claw 2026-08-29: with a null input, `Get_WMI` returns its
+        // 32-byte package with status 0x01.
+        using ManagementBaseObject? input = instance.GetMethodParameters(methodName);
         using ManagementClass packageClass = new("root\\WMI", "Package_32", null);
-        using ManagementObject package = packageClass.CreateInstance();
-        package["Bytes"] = request;
-        input["Data"] = package;
+        using ManagementObject? package = input is null ? null : packageClass.CreateInstance();
+        if (input is not null)
+        {
+            if (package is null)
+            {
+                throw new IOException("The WMI Package_32 request instance could not be created.");
+            }
+
+            package["Bytes"] = request;
+            input["Data"] = package;
+        }
 
         using ManagementBaseObject output = instance.InvokeMethod(methodName, input, null)
             ?? throw new IOException($"{methodName} returned no response.");

@@ -776,12 +776,28 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             LightingColorDescriptor(CapabilityInstances.RightRing, "Right ring"),
             LightingColorDescriptor(CapabilityInstances.LeftRing, "Left ring"),
             LightingColorDescriptor(CapabilityInstances.Buttons, "Buttons"),
-            BooleanDescriptor(CapabilityIds.Controller, CapabilityRole.ControllerSource,
-                DisplayKey.Controller, writable: false),
-            BooleanDescriptor(CapabilityIds.Motion, CapabilityRole.MotionSource,
-                DisplayKey.Motion, writable: false),
-            BooleanDescriptor(CapabilityIds.Rumble, CapabilityRole.HapticSink,
-                DisplayKey.Rumble, writable: false),
+            // These three carry the value kinds their roles require. ControllerSource and
+            // MotionSource are choices because "who owns this source" has more than two answers —
+            // the plugin can hold it, the device can still have it, or acquisition can have failed —
+            // and a boolean flattened all three into "not owned". HapticSink carries no value at
+            // all: it is a target rumble is written to, not something with a readable state.
+            //
+            // Declaring them as booleans made the descriptor set fail the SDK's role/value-kind
+            // check, and a rejected SET means every capability is rejected — so the whole device
+            // published nothing at all because of these three lines.
+            ChoiceDescriptor(
+                CapabilityIds.Controller,
+                CapabilityRole.ControllerSource,
+                DisplayKey.Controller,
+                SourceOwnershipChoices,
+                writable: false),
+            ChoiceDescriptor(
+                CapabilityIds.Motion,
+                CapabilityRole.MotionSource,
+                DisplayKey.Motion,
+                SourceOwnershipChoices,
+                writable: false),
+            ActionDescriptor(CapabilityIds.Rumble, CapabilityRole.HapticSink, DisplayKey.Rumble),
         ];
 
         EnsureUniqueCapabilityKeys(descriptors);
@@ -1261,7 +1277,11 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 continue;
             }
 
-            CapabilityValue? value = CurrentState(descriptor);
+            // A descriptor that cannot be read has no observed value to publish. The haptic sink is
+            // the only one: rumble is written to it and never read back, so a state carrying a value
+            // for it is rejected against its own descriptor shape. Its availability still matters,
+            // so the state is published — with no value, which is what "not readable" means.
+            CapabilityValue? value = descriptor.SupportsRead ? CurrentState(descriptor) : null;
             await _host.PublishCapabilityStateAsync(
                 new CapabilityState
                 {
@@ -1345,13 +1365,31 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 });
         }
 
-        if (descriptor.CapabilityId == CapabilityIds.Motion)
+        if (descriptor.CapabilityId == CapabilityIds.Rumble)
         {
-            return Boolean(_motion!.State is ClawServiceState.Owned);
+            // A sink has no value to report. Its descriptor says so, and its state has to agree or
+            // the state is rejected for a kind mismatch the way the descriptor set was.
+            return new CapabilityValue { Kind = CapabilityValueKind.None };
         }
 
-        return Boolean(_controller!.State is ClawServiceState.Owned);
+        return Choice(OwnershipOf(
+            descriptor.CapabilityId == CapabilityIds.Motion ? _motion!.State : _controller!.State));
     }
+
+    /// <summary>Projects a service's state onto the ownership vocabulary the descriptor offers.</summary>
+    /// <param name="state">The service's current state.</param>
+    /// <returns>One of the descriptor's declared choices.</returns>
+    /// <remarks>
+    /// Acquiring and Releasing report the ownership they are moving away from rather than inventing
+    /// a transient value: the row is read continuously, and a state that flickers through a fourth
+    /// value on every transition reads as a fault rather than as progress.
+    /// </remarks>
+    private static string OwnershipOf(ClawServiceState state) => state switch
+    {
+        ClawServiceState.Owned or ClawServiceState.Releasing => "plugin",
+        ClawServiceState.Idle or ClawServiceState.Passive or ClawServiceState.Acquiring => "device",
+        _ => "unavailable",
+    };
 
     private async ValueTask RefreshObservedAsync(
         string capabilityId,
@@ -1706,6 +1744,37 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             Persistence = CapabilityPersistence.Volatile,
         };
 
+    /// <summary>Who currently owns a physical input source.</summary>
+    /// <remarks>
+    /// Ordered so the first value is the resting state. <c>device</c> means the Claw's own firmware
+    /// still has it, <c>plugin</c> means this plugin acquired it, and <c>unavailable</c> covers both
+    /// a failed acquisition and a source this unit does not expose — a user reading the row needs
+    /// those to be distinguishable, which is exactly what the previous boolean threw away.
+    /// </remarks>
+    private static readonly string[] SourceOwnershipChoices = ["device", "plugin", "unavailable"];
+
+    /// <summary>A capability that is invoked rather than read or written.</summary>
+    /// <param name="id">Capability id.</param>
+    /// <param name="role">Semantic role, which must be one the SDK maps to <c>None</c>.</param>
+    /// <param name="display">Display key.</param>
+    /// <returns>The descriptor.</returns>
+    private static CapabilityDescriptor ActionDescriptor(
+        string id,
+        CapabilityRole role,
+        DisplayKey display) => new()
+        {
+            CapabilityId = id,
+            Role = role,
+            ValueKind = CapabilityValueKind.None,
+            Display = new CapabilityDisplay { Key = display },
+            SupportsRead = false,
+            SupportsWrite = false,
+            // A descriptor has to offer at least one operation, and for a sink the operation is the
+            // invoke: rumble is written to it, never read back from it.
+            SupportsAction = true,
+            Persistence = CapabilityPersistence.Volatile,
+        };
+
     private static CapabilityDescriptor BooleanDescriptor(
         string id,
         CapabilityRole role,
@@ -1743,6 +1812,12 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     {
         Kind = CapabilityValueKind.Curve,
         CurveValue = ClawA2VmFanCapability.DecodeCurve(table),
+    };
+
+    private static CapabilityValue Choice(string value) => new()
+    {
+        Kind = CapabilityValueKind.Choice,
+        ChoiceValue = value,
     };
 
     private static CapabilityValue Scenario(byte raw) => new()
