@@ -1049,6 +1049,65 @@ internal sealed class ChordSuppressorService(
     }
 }
 
+/// <summary>Owns the panel's variable-refresh state for one cycle.</summary>
+/// <remarks>
+/// A service of its own rather than a corner of the lighting or power services, because it is the
+/// only capability driven by the GPU driver rather than by MSI's firmware: it has no firmware
+/// identity to verify, and it must be restored on make-safe even when every WMI and MCU path failed.
+/// </remarks>
+internal sealed class DisplayService : ClawServiceStatus, IDisposable
+{
+    private readonly ArcSyncTransport _arcSync = new();
+    private bool _disposed;
+
+    /// <summary>Creates the service without touching the driver.</summary>
+    public DisplayService()
+        : base(ServiceIds.Display)
+    {
+    }
+
+    /// <summary>Whether a variable-refresh capable panel answered.</summary>
+    public bool IsAvailable => _arcSync.IsAvailable;
+
+    /// <summary>Opens the driver and selects the panel, capturing the profile to restore later.</summary>
+    /// <returns><see langword="true"/> when variable refresh can be driven.</returns>
+    public bool TryAcquire()
+    {
+        bool available = _arcSync.TryOpen();
+
+        // Passive rather than Faulted when no capable panel answered: nothing went wrong, the
+        // device simply does not have the feature, and Faulted would report a defect that is not one.
+        State = available ? ClawServiceState.Owned : ClawServiceState.Passive;
+        return available;
+    }
+
+    /// <summary>Reads the current state, or null when it cannot be read.</summary>
+    /// <returns>The panel's variable-refresh state.</returns>
+    public ArcSyncState? Read() => _arcSync.Read();
+
+    /// <summary>Turns variable refresh on or off, verifying the result.</summary>
+    /// <param name="enabled">Whether variable refresh should be active.</param>
+    /// <returns><see langword="true"/> when the panel reports the requested state afterwards.</returns>
+    public bool TryWrite(bool enabled) => _arcSync.TryWrite(enabled);
+
+    /// <summary>Restores the profile captured when the cycle started.</summary>
+    /// <returns><see langword="true"/> when nothing was left changed.</returns>
+    public bool Restore() => _arcSync.TryRestore();
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _arcSync.Dispose();
+        State = ClawServiceState.Idle;
+    }
+}
+
 internal static class ServiceIds
 {
     public const string OemEvents = "msi-oem-events";
@@ -1059,6 +1118,7 @@ internal static class ServiceIds
     public const string Motion = "claw-motion";
     public const string Controller = "physical-controller";
     public const string ChordSuppressor = "firmware-chord-suppressor";
+    public const string Display = "claw-display";
 }
 
 internal static class ClawFirmwareIdentities

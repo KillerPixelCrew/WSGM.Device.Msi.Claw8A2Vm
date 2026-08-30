@@ -28,6 +28,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     private MotionService? _motion;
     private ControllerService? _controller;
     private ChordSuppressorService? _suppressor;
+    private DisplayService? _arcSync;
     private ClawRecoveryJournal? _journal;
     private ClawA2VmPowerCapability? _powerCapability;
     private ClawA2VmFanCapability? _fanCapability;
@@ -141,6 +142,11 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         _telemetry = new TelemetryService(_services.Identity, fanCapability);
         _lighting = new LightingService(_services.Identity, _services.Mcu, lightingCapability);
         _motion = new MotionService(_services.Motion);
+
+        // Opened before descriptors are built, because whether the variable-refresh row exists at
+        // all depends on whether a capable panel answered.
+        _arcSync = new DisplayService();
+        _ = _arcSync.TryAcquire();
         _controller = new ControllerService(
             _services.Identity,
             _services.Mcu,
@@ -494,6 +500,17 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             {
                 await StopServicesAsync(OperationContext(context.Deadline), cancellationToken)
                     .ConfigureAwait(false);
+            }
+
+            // Restored before the result is taken, and outside the service loop, because the
+            // display is held by the graphics driver rather than by anything StopServicesAsync
+            // releases. Leaving variable refresh off after WSGM exits would be a change the user
+            // never made and has no obvious way to undo.
+            if (_arcSync is not null)
+            {
+                _ = _arcSync.Restore();
+                _arcSync.Dispose();
+                _arcSync = null;
             }
 
             PluginStopResult result = CurrentStopResult();
@@ -850,6 +867,23 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 SourceOwnershipChoices,
                 writable: false),
             ActionDescriptor(CapabilityIds.Rumble, CapabilityRole.HapticSink, DisplayKey.Rumble),
+            .. _arcSync?.IsAvailable == true
+                ?
+                [
+                    // Published only when a variable-refresh capable panel actually answered. A
+                    // descriptor for a panel that cannot do it would draw a row that always
+                    // refuses, which is worse than no row: the device-persistent marking is
+                    // deliberate, because the driver keeps the profile across a WSGM restart.
+                    BooleanDescriptor(
+                        CapabilityIds.VariableRefreshRate,
+                        CapabilityRole.VariableRefreshRate,
+                        DisplayKey.VariableRefreshRate,
+                        writable: true) with
+                    {
+                        Persistence = CapabilityPersistence.DevicePersistent,
+                    },
+                ]
+                : (IReadOnlyList<CapabilityDescriptor>)[],
         ];
 
         EnsureUniqueCapabilityKeys(descriptors);
@@ -1007,8 +1041,45 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                     _ => state,
                 },
                 cancellationToken),
+            CapabilityIds.VariableRefreshRate => ApplyVariableRefreshCommand(command),
             _ => ReadOnlyHandler(command, cancellationToken),
         };
+    }
+
+    /// <remarks>
+    /// Not journalled, unlike the WMI and MCU writes. The journal exists so a value written into
+    /// firmware can be put back after an abnormal exit; this one is held by the graphics driver,
+    /// restored from the profile captured at cycle start, and reported as verified only because the
+    /// read-back agrees rather than because the call returned success.
+    /// </remarks>
+    private ValueTask<CapabilityCommandResult> ApplyVariableRefreshCommand(CapabilityCommand command)
+    {
+        if (_arcSync is not { IsAvailable: true } display)
+        {
+            return ValueTask.FromResult(Rejected(
+                command,
+                CapabilityReasonCode.Unsupported,
+                "No variable-refresh capable panel is present."));
+        }
+
+        bool requested = command.RequestedValue!.BooleanValue!.Value;
+        if (!display.TryWrite(requested))
+        {
+            return ValueTask.FromResult(Rejected(
+                command,
+                CapabilityReasonCode.TransportFaulted,
+                $"The display driver did not apply variable refresh {(requested ? "on" : "off")}."));
+        }
+
+        // Verified rather than unverified: TryWrite only reports success once the profile has been
+        // read back and agrees, so the readback carried here is an observation and not a hope.
+        return ValueTask.FromResult(new CapabilityCommandResult
+        {
+            CommandId = command.CommandId,
+            Outcome = CommandOutcome.AppliedVerified,
+            ReadbackValue = Boolean(requested),
+            CompletedAt = DateTimeOffset.UtcNow,
+        });
     }
 
     private ValueTask<CapabilityCommandResult> ApplyFanCurveCommandAsync(
@@ -1039,6 +1110,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         CapabilityIds.LightingBrightness or CapabilityIds.LightingColor => _lighting,
         CapabilityIds.Controller or CapabilityIds.Rumble => _controller,
         CapabilityIds.Motion => _motion,
+        CapabilityIds.VariableRefreshRate => _arcSync,
         _ => null,
     };
 
@@ -1046,7 +1118,9 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     {
         CapabilityIds.LightingBrightness or CapabilityIds.LightingColor
             or CapabilityIds.Controller or CapabilityIds.Rumble => FirmwareKind.Mcu,
-        CapabilityIds.Motion => FirmwareKind.None,
+        // Driven by the GPU driver, not by MSI firmware, so there is no firmware revision to gate
+        // it on and gating it on the WMI one would refuse it whenever that path is degraded.
+        CapabilityIds.Motion or CapabilityIds.VariableRefreshRate => FirmwareKind.None,
         _ => FirmwareKind.Wmi,
     };
 

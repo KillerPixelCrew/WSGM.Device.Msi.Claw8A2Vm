@@ -756,6 +756,7 @@ internal static class CapabilityIds
     public const string Controller = "controller.source";
     public const string Motion = "motion.source";
     public const string Rumble = "haptic.rumble";
+    public const string VariableRefreshRate = "display.variable-refresh";
 }
 
 internal static class CapabilityInstances
