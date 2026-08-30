@@ -4,6 +4,9 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>WSGM.Device.Msi.Claw8A2Vm</AssemblyName>
     <RootNamespace>WSGM.Device.Msi.Claw8A2Vm</RootNamespace>
+    <!-- The Arc Sync transport binds IGCL through function pointers and blittable structs whose
+         layouts mirror igcl_api.h exactly. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- Loaded by WSGM.DeviceHost at runtime from its package directory, never
          referenced by a production project. The consolidated WSGM.Device.Tests
          project is the sole compile-time exception for fake-hardware regression tests;

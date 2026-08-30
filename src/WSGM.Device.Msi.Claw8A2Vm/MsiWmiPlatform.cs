@@ -246,7 +246,14 @@ internal sealed class WindowsClawIdentityReader(IMsiWmiTransport wmi) : IClawIde
                     && ecFirmware.StartsWith(ClawHardwareFacts.EcFirmware, StringComparison.OrdinalIgnoreCase);
             }
         }
-        catch (Exception ex) when (ex is ManagementException or IOException or UnauthorizedAccessException
+        // InvalidDataException is in this list because this class throws it: an invalid Package_32
+        // response, a bad status byte, and more than one active MSI_ACPI instance all raise it.
+        // Leaving it out meant a malformed provider response escaped WindowsClawIdentityReader,
+        // failed plugin startup and eventually faulted all of Device Integration — controller,
+        // motion and OEM services included, none of which need WMI — instead of degrading the
+        // WMI-backed power and fan capabilities alone.
+        catch (Exception ex) when (ex is ManagementException or IOException
+            or InvalidDataException or UnauthorizedAccessException
             || (ex is OperationCanceledException && !cancellationToken.IsCancellationRequested))
         {
             // A permissions refusal, a missing instance and a malformed response all became this

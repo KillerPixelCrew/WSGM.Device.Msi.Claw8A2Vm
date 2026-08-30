@@ -400,8 +400,25 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 return;
             }
 
+            long previousCycleGeneration = _cycleGeneration;
             _controller.Enabled = context.Enabled;
             _cycleGeneration = context.CycleGeneration;
+            // DeviceHost advances the adapter to a fresh cycle generation when controller
+            // management is switched on, and that resets the descriptor generation it will accept.
+            // Rebuilding and republishing the surface first is what makes the states below valid —
+            // without it the very first state after a successful hardware acquisition was rejected
+            // as stale and the whole enable faulted with the controller already taken. The disable
+            // request carries the unchanged generation, and republishing there would be refused as
+            // non-monotonic, so the rebuild is tied to the advance rather than to the request.
+            if (_cycleGeneration != previousCycleGeneration
+                && _host is not null
+                && _descriptorSet is not null)
+            {
+                BuildCapabilitySurface();
+                await _host.PublishDescriptorsAsync(_descriptorSet!, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             if (context.Enabled)
             {
                 ClawServiceResult result = await _controller.AcquireAsync(

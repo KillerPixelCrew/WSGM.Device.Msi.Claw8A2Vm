@@ -413,8 +413,54 @@ internal sealed class LightingService(
 internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatus(ServiceIds.Motion)
 {
     private readonly IClawMotionSource _source = source ?? throw new ArgumentNullException(nameof(source));
+    private bool _staleReported;
+
+    /// <summary>How long a sensor reading may still be attached to a controller sample.</summary>
+    /// <remarks>
+    /// The gyrometer reports at tens of hertz while the controller reader runs at about 125 Hz, so
+    /// the same reading legitimately rides several samples. What is not legitimate is replaying it
+    /// after the sensor stopped: a last non-zero angular velocity attached to every following
+    /// sample produces continuous gyro movement on a device that is lying still. A quarter of a
+    /// second is several sensor periods and far short of anything a player would notice.
+    /// </remarks>
+    internal static readonly TimeSpan MaximumMotionAge = TimeSpan.FromMilliseconds(250);
 
     public MotionSample? Latest { get; private set; }
+
+    /// <summary>The last reading, or null once it is too old to still describe the device.</summary>
+    /// <param name="now">Current time, from the caller's clock.</param>
+    /// <returns>The reading to attach, or null when motion has gone stale.</returns>
+    public MotionSample? Current(DateTimeOffset now)
+    {
+        if (Latest is not { } sample)
+        {
+            return null;
+        }
+
+        // A source that supplies no timestamp cannot be aged; it is passed through as before.
+        if (sample.SensorTimestamp is not { } stamp)
+        {
+            return sample;
+        }
+
+        if (now - stamp <= MaximumMotionAge)
+        {
+            return sample;
+        }
+
+        // Once per stall, never per sample: this is called from the controller reader at about
+        // 125 Hz, and a stalled sensor would otherwise fill the log with one line per report.
+        if (!_staleReported)
+        {
+            _staleReported = true;
+            PluginTrace.Warn(
+                "motion",
+                $"Gyroscope reading is {(now - stamp).TotalMilliseconds:F0} ms old; motion is "
+                + "dropped from controller samples until the sensor reports again.");
+        }
+
+        return null;
+    }
 
     public async ValueTask<ClawServiceResult> AcquireAsync(
         ClawCycleContext context,
@@ -424,6 +470,13 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
             sample =>
             {
                 Latest = sample;
+                // A fresh reading ends the stall, and re-arms the one-shot report for the next one.
+                if (_staleReported)
+                {
+                    _staleReported = false;
+                    PluginTrace.Info("motion", "Gyroscope readings resumed.");
+                }
+
                 return ValueTask.CompletedTask;
             },
             cancellationToken).ConfigureAwait(false);
@@ -886,8 +939,11 @@ internal sealed class ControllerService(
         }
 
         _rearButtons = current;
+        // Aged rather than taken blindly. If the WinRT gyrometer stops raising ReadingChanged while
+        // the controller keeps reporting, the last reading would otherwise ride every following
+        // sample and replay a non-zero angular velocity through the virtual Deck indefinitely.
         await _host.PublishControllerSampleAsync(
-            sample with { Motion = _motion.Latest },
+            sample with { Motion = _motion.Current(sample.Timestamp) },
             CancellationToken.None).ConfigureAwait(false);
     }
 

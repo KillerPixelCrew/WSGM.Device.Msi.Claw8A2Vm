@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using WSGM.Device.Sdk.Capabilities;
+using WSGM.Device.Sdk.Plugin;
 
 namespace WSGM.Device.Msi.Claw8A2Vm;
 
@@ -586,13 +587,57 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
             };
         }
 
+        // The exact bytes the device held before this command, kept for the rollback below. This
+        // profile survives a reboot, so a write that lands only partly — or lands normalized into
+        // something the user did not choose — would otherwise stay on the hardware permanently
+        // while the UI reported the command as failed.
+        byte[] restore = Encode(before);
         byte[] payload = Encode(wanted);
         _lastPersistentWrite = DateTimeOffset.UtcNow;
-        await _transport.WriteProfileAsync(
-            ClawHardwareFacts.LightingProfileAddress,
-            payload,
-            cancellationToken).ConfigureAwait(false);
-        LightingState readback = await ReadAsync(cancellationToken).ConfigureAwait(false);
+        LightingState readback;
+        try
+        {
+            await _transport.WriteProfileAsync(
+                ClawHardwareFacts.LightingProfileAddress,
+                payload,
+                cancellationToken).ConfigureAwait(false);
+            readback = await ReadAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // The write may have reached the MCU before it failed, so the device cannot be assumed
+            // untouched: restore explicitly rather than hoping nothing happened.
+            RollbackResult rollback = await RollbackAsync(before, restore, CancellationToken.None)
+                .ConfigureAwait(false);
+            PluginTrace.Failure("lighting", "Persistent lighting write failed", exception);
+            return new CapabilityCommandResult
+            {
+                CommandId = command.CommandId,
+                Outcome = CommandOutcome.Indeterminate,
+                Reason = new CapabilityReason(
+                    CapabilityReasonCode.TransportFaulted,
+                    $"The persistent lighting write failed: {exception.Message}"),
+                Rollback = rollback,
+                CompletedAt = DateTimeOffset.UtcNow,
+            };
+        }
+
+        if (readback != wanted)
+        {
+            RollbackResult rollback = await RollbackAsync(before, restore, cancellationToken)
+                .ConfigureAwait(false);
+            return new CapabilityCommandResult
+            {
+                CommandId = command.CommandId,
+                Outcome = CommandOutcome.Indeterminate,
+                Reason = new CapabilityReason(
+                    CapabilityReasonCode.TransportFaulted,
+                    "Persistent lighting readback did not match the committed profile."),
+                Rollback = rollback,
+                CompletedAt = DateTimeOffset.UtcNow,
+            };
+        }
+
         CapabilityValue value = command.CapabilityId == CapabilityIds.LightingBrightness
             ? Integer(readback.Brightness)
             : Color(command.InstanceId switch
@@ -602,24 +647,56 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
                 CapabilityInstances.Buttons => readback.ButtonsColor,
                 _ => throw new InvalidOperationException("Unknown lighting zone."),
             });
-        return readback == wanted
-            ? new CapabilityCommandResult
+        return new CapabilityCommandResult
+        {
+            CommandId = command.CommandId,
+            Outcome = CommandOutcome.AppliedVerified,
+            ReadbackValue = value,
+            CompletedAt = DateTimeOffset.UtcNow,
+        };
+    }
+
+    /// <summary>Restores the exact profile the device held before an unverified write.</summary>
+    /// <param name="before">The state that profile represented.</param>
+    /// <param name="restore">Its exact 32 bytes, encoded before the write.</param>
+    /// <param name="cancellationToken">Cancels the restore.</param>
+    /// <returns>What the rollback achieved, as the command result reports it.</returns>
+    /// <remarks>
+    /// Verified by reading back, because an unverified rollback is the same problem one step later.
+    /// The rate limit is deliberately not consulted here: it exists to stop a user's slider from
+    /// hammering the MCU, and refusing to undo a bad write because the last one was recent is how
+    /// the unintended profile would become permanent.
+    /// </remarks>
+    private async ValueTask<RollbackResult> RollbackAsync(
+        LightingState before,
+        byte[] restore,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _transport.WriteProfileAsync(
+                ClawHardwareFacts.LightingProfileAddress,
+                restore,
+                cancellationToken).ConfigureAwait(false);
+            _lastPersistentWrite = DateTimeOffset.UtcNow;
+            LightingState restored = await ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (restored == before)
             {
-                CommandId = command.CommandId,
-                Outcome = CommandOutcome.AppliedVerified,
-                ReadbackValue = value,
-                CompletedAt = DateTimeOffset.UtcNow,
+                PluginTrace.Info("lighting", "Unverified lighting write was rolled back.");
+                return RollbackResult.RestoredVerified;
             }
-            : new CapabilityCommandResult
-            {
-                CommandId = command.CommandId,
-                Outcome = CommandOutcome.Indeterminate,
-                Reason = new CapabilityReason(
-                    CapabilityReasonCode.TransportFaulted,
-                    "Persistent lighting readback did not match the committed profile."),
-                Rollback = RollbackResult.NotRequired,
-                CompletedAt = DateTimeOffset.UtcNow,
-            };
+
+            PluginTrace.Warn(
+                "lighting",
+                "The lighting profile could not be restored; the device holds an unintended "
+                + "profile that persists across reboot.");
+            return RollbackResult.RestoreFailed;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            PluginTrace.Failure("lighting", "Lighting rollback failed", exception);
+            return RollbackResult.RestoreFailed;
+        }
     }
 
     internal static byte[] Encode(LightingState state)
