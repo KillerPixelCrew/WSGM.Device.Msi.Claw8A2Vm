@@ -1498,6 +1498,18 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             return new CapabilityValue { Kind = CapabilityValueKind.None };
         }
 
+        if (descriptor.CapabilityId == CapabilityIds.VariableRefreshRate)
+        {
+            // This branch was missing, and its absence was invisible until it wasn't: VRR fell
+            // through to the controller-ownership Choice below, publishing a Choice value against a
+            // Boolean descriptor. The router rejected every VRR state for the kind mismatch, the
+            // capability never became available, and Valve's own VRR row — which hides itself
+            // through exactly that availability — never rendered. One log line every ten seconds
+            // said all of this; it took a missing row to make anyone read it.
+            ArcSyncState? state = _arcSync?.Read();
+            return state is { Supported: true } observed ? Boolean(observed.Enabled) : null;
+        }
+
         return Choice(OwnershipOf(
             descriptor.CapabilityId == CapabilityIds.Motion ? _motion!.State : _controller!.State));
     }
