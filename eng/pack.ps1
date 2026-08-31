@@ -72,6 +72,35 @@ if (-not (Test-Path -LiteralPath (Join-Path $packageDirectory $entryAssembly) -P
     throw "The publish did not produce the manifest's entry assembly: $entryAssembly"
 }
 
+# Physical glyph artwork. MSBuild does not copy this: the importer discovers profiles purely by
+# directory (glyphs/profiles/*.json, glyphs/assets/<sha256>.<ext>), so the layout is copied through
+# verbatim rather than declared file by file. Package validation treats glyphs as optional, so a
+# missing copy step here would silently ship a package with no physical glyphs and still pass every
+# gate — which is exactly what happened once. The count is asserted for that reason.
+$glyphSource = Join-Path $source "glyphs"
+if (-not (Test-Path -LiteralPath $glyphSource -PathType Container)) {
+    throw "The package's glyphs directory is missing: $glyphSource"
+}
+$glyphFiles = @(Get-ChildItem -LiteralPath $glyphSource -File -Recurse)
+if ($glyphFiles.Count -eq 0) {
+    throw "The package's glyphs directory is empty."
+}
+foreach ($glyphFile in $glyphFiles) {
+    $relative = [IO.Path]::GetRelativePath($source, $glyphFile.FullName)
+    $target = Join-Path $packageDirectory $relative
+    $targetParent = Split-Path -Parent $target
+    if (-not (Test-Path -LiteralPath $targetParent -PathType Container)) {
+        New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $glyphFile.FullName -Destination $target -Force
+}
+$profileCount = @(Get-ChildItem -LiteralPath (Join-Path $packageDirectory "glyphs\profiles") `
+    -Filter "*.json" -File -ErrorAction SilentlyContinue).Count
+if ($profileCount -eq 0) {
+    throw "The staged package contains no glyph profile."
+}
+Write-Host "Staged $($glyphFiles.Count) glyph file(s), $profileCount profile(s)"
+
 $deviceLab = & (Join-Path $PSScriptRoot "acquire-devicelab.ps1")
 $validator = Join-Path $deviceLab "wsgm-device.exe"
 
