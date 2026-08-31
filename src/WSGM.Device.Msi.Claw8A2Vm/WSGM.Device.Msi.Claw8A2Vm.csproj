@@ -12,7 +12,8 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\src\WSGM.Device.Sdk\WSGM.Device.Sdk.csproj" />
+    <ProjectReference
+        Include="..\..\external\WSGM.Device.Sdk\src\WSGM.Device.Sdk\WSGM.Device.Sdk.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="System.Management" Version="10.0.0" />
