@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          # external/WSGM.Device.Sdk is a submodule. Without this it checks out empty and the
+          # build fails on an unresolvable project path rather than on the missing checkout.
+          submodules: recursive
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Build
+        run: dotnet build WSGM.Device.Msi.Claw8A2Vm.slnx --configuration Release
+
+      - name: Test
+        # Hardware-free by construction: these drive the plugin through PluginTestKit against fake
+        # transports. Real device behaviour is only ever proven on the device, never here.
+        run: dotnet test WSGM.Device.Msi.Claw8A2Vm.slnx --configuration Release --no-build
+
+      - name: Pack
+        # Proves the package still assembles and passes the pinned validator, which is a different
+        # question from whether the code compiles.
+        run: ./eng/pack.ps1
+        shell: pwsh

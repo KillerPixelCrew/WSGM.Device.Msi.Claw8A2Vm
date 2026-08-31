@@ -1,0 +1,3 @@
+[submodule "external/WSGM.Device.Sdk"]
+	path = external/WSGM.Device.Sdk
+	url = https://github.com/KillerPixelCrew/WSGM.Device.Sdk

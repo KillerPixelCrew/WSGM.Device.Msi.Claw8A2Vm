@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "reviewedAtUtc": "2026-08-31T00:00:00Z",
+  "policy": "devicelab-pinned-release",
+  "notes": [
+    "Device Lab validates and packs this plugin. It is pinned rather than referenced because a package must be validated by a known tool version: 'it passed validation' means nothing without saying which validator said so.",
+    "No binary is checked in. eng/acquire-devicelab.ps1 downloads the pinned asset into a gitignored staging directory and refuses anything whose digest does not match."
+  ],
+  "component": {
+    "id": "devicelab",
+    "repository": "https://github.com/KillerPixelCrew/WSGM.DeviceLab",
+    "tag": "v0.1.0",
+    "version": "0.1.0",
+    "asset": "wsgm-device-0.1.0-win-x64.zip",
+    "assetUrl": "https://github.com/KillerPixelCrew/WSGM.DeviceLab/releases/download/v0.1.0/wsgm-device-0.1.0-win-x64.zip",
+    "assetSha256": "69A7E571F9F989DFD135604D83B96E7091C63046EA220EBAB870FE750C24D39C",
+    "assetBytes": 77066521,
+    "executable": "wsgm-device.exe",
+    "license": "MIT"
+  }
+}

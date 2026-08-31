@@ -7,8 +7,8 @@
     <!-- The Arc Sync transport binds IGCL through function pointers and blittable structs whose
          layouts mirror igcl_api.h exactly. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <!-- Loaded by WSGM from its installed package directory. WSGM.Tests is the
-         only compile-time consumer, for fake-hardware regression tests. -->
+    <!-- Loaded by WSGM from its installed package directory, never referenced by it. The test
+         project is the only compile-time consumer, for fake-hardware regression tests. -->
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
@@ -22,6 +22,8 @@
     <None Update="plugin.wsgm.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Update="PROVENANCE.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Update="THIRD_PARTY_NOTICES.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- The package ships its licence beside the assembly, because the installed package is read
+         as a standalone directory with no repository around it. -->
     <None Include="..\..\LICENSE" Link="LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -1,3 +1,3 @@
 using System.Runtime.CompilerServices;
 
-[assembly: InternalsVisibleTo("WSGM.Tests")]
+[assembly: InternalsVisibleTo("WSGM.Device.Msi.Claw8A2Vm.Tests")]

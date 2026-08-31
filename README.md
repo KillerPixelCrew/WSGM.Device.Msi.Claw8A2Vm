@@ -1,0 +1,79 @@
+# WSGM Device Plugin — MSI Claw 8 AI+ A2VM
+
+The device plugin that teaches [WSGM](https://github.com/NightHammer1000/WSGM) an MSI Claw 8 AI+
+A2VM: power limits, fan behaviour, lighting, the controller and its motion sensors, the OEM buttons,
+variable refresh, and the physical glyphs shown in Steam.
+
+It is also **the reference implementation of the
+[WSGM Device SDK](https://github.com/KillerPixelCrew/WSGM.Device.Sdk)** — the plugin to read, and
+copy from, when writing one for another handheld. That is why it is MIT: a reference nobody may copy
+is not a reference.
+
+## What a plugin actually does
+
+WSGM owns the session and the UI; the plugin owns the hardware. It publishes *semantic capabilities*
+— "a TDP limit between these bounds", "a fan curve", "a lighting zone" — and WSGM renders them and
+routes user intent back as commands. WSGM never touches the device.
+
+This one is a worked example of the parts that are easy to get wrong:
+
+| File | What it demonstrates |
+| --- | --- |
+| `Claw8A2VmPlugin.cs` | the lifecycle: detect, start, command, settings, stop |
+| `ClawCapabilities.cs` | publishing capabilities and reporting refusals honestly |
+| `MsiWmiPlatform.cs` | the vendor WMI surface behind power and fans |
+| `WindowsHidTransports.cs` | HID transports for OEM controls and lighting |
+| `WindowsMotionSource.cs` | motion samples at rate, without logging per sample |
+| `ArcSyncTransport.cs` | variable refresh through Intel's Graphics Control Library |
+| `ClawRecoveryJournal.cs` | leaving the device safe when a cycle ends badly |
+
+## Hardware knowledge is observed, not documented
+
+Every register, report layout and WMI method here was established on a physical device. `PROVENANCE.md`
+records the hardware revision it was confirmed against. A different Claw model is a different device,
+and detection does not claim it.
+
+That is the honest constraint of this whole category: nothing here can be derived from a datasheet,
+so nothing here should be trusted on a machine it was not confirmed on.
+
+## Building
+
+```powershell
+git clone --recursive https://github.com/KillerPixelCrew/WSGM.Device.Msi.Claw8A2Vm
+dotnet build WSGM.Device.Msi.Claw8A2Vm.slnx
+dotnet test  WSGM.Device.Msi.Claw8A2Vm.slnx
+```
+
+`--recursive` matters: `external/WSGM.Device.Sdk` is a submodule, and without it the build fails on
+an unresolvable project path rather than saying what is missing.
+
+The tests are unattended and hardware-free. They drive the plugin through `PluginTestKit` against
+fake transports, which is the only kind of test that belongs in CI — the real behaviour is only ever
+proven on the device.
+
+## Packaging
+
+```powershell
+./eng/pack.ps1
+```
+
+This publishes framework-dependent (WSGM loads the plugin into its own process, which already has
+the runtime), validates the assembled package with a **pinned** Device Lab, then packs the
+`.wsgmpkg`. The order is deliberate: validating after packing would prove nothing about what was
+packed, and "it passed validation" means nothing without saying which validator said so — hence the
+pin in `third_party/devicelab/devicelab.lock.json`.
+
+## Installing
+
+WSGM ships this package as its built-in device component, so a normal WSGM install already has it.
+To install a build of your own, see
+[the authoring guide](https://github.com/NightHammer1000/WSGM/blob/master/docs/device-plugin-authoring.md) —
+in short, expand the `.wsgmpkg` into a fresh directory and hand it to
+`WSGM.exe --install-device-plugin`, which validates it again before replacing the protected slot.
+
+## Licence
+
+MIT. See `LICENSE`. A plugin links only the MIT SDK, never WSGM, so nothing here obliges a derived
+plugin to any particular licence. Third-party notices are in
+`src/WSGM.Device.Msi.Claw8A2Vm/THIRD_PARTY_NOTICES.md` — the glyph artwork is MIT from
+`handheld-controller-glyphs`, and no Intel code is redistributed.

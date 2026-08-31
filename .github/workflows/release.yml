@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Test
+        run: dotnet test WSGM.Device.Msi.Claw8A2Vm.slnx --configuration Release
+
+      - name: Pack
+        id: pack
+        shell: pwsh
+        run: |
+          ./eng/pack.ps1
+          $package = Get-ChildItem -Path publish -Filter '*.wsgmpkg' -File |
+            Select-Object -First 1
+          if ($null -eq $package) { throw 'eng/pack.ps1 produced no .wsgmpkg.' }
+          # The version comes from plugin.wsgm.json, which is the authority. A tag that disagrees
+          # with the manifest would ship a package whose name and contents contradict each other.
+          $manifestVersion = (Get-Content src/WSGM.Device.Msi.Claw8A2Vm/plugin.wsgm.json -Raw |
+            ConvertFrom-Json).version
+          $tagVersion = '${{ github.ref_name }}' -replace '^v', ''
+          if ('${{ github.event_name }}' -eq 'push' -and $tagVersion -cne $manifestVersion) {
+            throw "Tag $tagVersion does not match plugin.wsgm.json version $manifestVersion."
+          }
+          $hash = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash
+          "path=$($package.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($package.Name)"     >> $env:GITHUB_OUTPUT
+          "sha256=$hash"              >> $env:GITHUB_OUTPUT
+          # WSGM pins this package by digest, so the digest ships with it rather than being
+          # something a consumer has to download the asset to learn.
+          "SHA-256: $hash" | Set-Content -Path "$($package.FullName).sha256"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.pack.outputs.path }}
+            ${{ steps.pack.outputs.path }}.sha256
+          body: |
+            MSI Claw 8 AI+ A2VM device plugin, validated and packed by the pinned Device Lab.
+
+            `${{ steps.pack.outputs.name }}`
+            SHA-256 `${{ steps.pack.outputs.sha256 }}`
+
+            Pin this in a consuming repository by asset URL and digest. Do not re-push an existing
+            tag: it rebuilds the asset, which is never byte-identical and breaks every pin.
