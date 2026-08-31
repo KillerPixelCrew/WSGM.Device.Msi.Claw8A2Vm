@@ -524,7 +524,7 @@ internal sealed class MsiOemEventSource : IMsiOemEventSource
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            // DeviceHost owns diagnostics for a rejected publication. An OEM event must not tear
+            // WSGM owns diagnostics for a rejected publication. An OEM event must not tear
             // down the WMI callback thread or leave an unobserved task exception behind.
         }
     }

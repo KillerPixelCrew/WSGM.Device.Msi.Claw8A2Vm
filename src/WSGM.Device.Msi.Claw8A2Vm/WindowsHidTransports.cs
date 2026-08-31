@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 using WSGM.Device.Sdk.Input;
+using WSGM.Device.Sdk.Plugin;
 
 namespace WSGM.Device.Msi.Claw8A2Vm;
 
@@ -106,34 +107,6 @@ internal sealed class WindowsClawMcuTransport : IClawMcuTransport
         }
     }
 
-    public async ValueTask<ClawControllerMode> ReadModeAsync(CancellationToken cancellationToken)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        await _serializer.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            using HidEndpoint endpoint = HidEndpointEnumerator.FindMcu()
-                ?? throw new FileNotFoundException("The exact A2VM MCU HID collection was not present.");
-            await using FileStream stream = endpoint.OpenReadWrite();
-            await WriteReportAsync(stream, CreateRequest(0x26), cancellationToken).ConfigureAwait(false);
-            byte[] response = await ReadMatchingAsync(
-                stream,
-                report => report[0] == 0x10 && report[4] == 0x27,
-                TimeSpan.FromSeconds(1),
-                cancellationToken).ConfigureAwait(false);
-            return response[5] switch
-            {
-                1 => ClawControllerMode.XInput,
-                2 => ClawControllerMode.DirectInput,
-                _ => ClawControllerMode.Offline,
-            };
-        }
-        finally
-        {
-            _serializer.Release();
-        }
-    }
-
     public async ValueTask<ControllerTopology> SwitchModeAsync(
         ClawControllerMode mode,
         string physicalLocation,
@@ -146,10 +119,7 @@ internal sealed class WindowsClawMcuTransport : IClawMcuTransport
             throw new ArgumentOutOfRangeException(nameof(mode));
         }
 
-        if (deadline - DateTimeOffset.UtcNow < TimeSpan.FromSeconds(2))
-        {
-            throw new OperationCanceledException("Insufficient lifecycle budget for controller re-enumeration.");
-        }
+        ClawWriteBudget.Require(deadline, "controller re-enumeration");
 
         await _serializer.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -277,9 +247,11 @@ internal sealed class WindowsClawControllerSource(ClawOemButtonLatch oemButtons)
     public async ValueTask StartAsync(
         long cycleGeneration,
         Func<CanonicalControllerSample, ValueTask> publish,
+        Action<Exception> fault,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(publish);
+        ArgumentNullException.ThrowIfNull(fault);
         cancellationToken.ThrowIfCancellationRequested();
         TaskCompletionSource firstSample = new(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (_gate)
@@ -300,6 +272,7 @@ internal sealed class WindowsClawControllerSource(ClawOemButtonLatch oemButtons)
                 publish,
                 firstSample,
                 _readerCancellation.Token);
+            _ = ObserveReaderAsync(_readerTask, _readerCancellation.Token, fault);
         }
 
         try
@@ -382,9 +355,11 @@ internal sealed class WindowsClawControllerSource(ClawOemButtonLatch oemButtons)
         try
         {
             FileStream? stream;
+            int outputLength;
             lock (_gate)
             {
                 stream = _stream;
+                outputLength = _endpoint?.OutputLength ?? 0;
             }
 
             if (stream is null)
@@ -392,7 +367,10 @@ internal sealed class WindowsClawControllerSource(ClawOemButtonLatch oemButtons)
                 return;
             }
 
-            byte[] report = ClawControllerCodec.EncodeRumble(weak, strong);
+            byte[] report = ClawControllerCodec.EncodeRumble(
+                weak,
+                strong,
+                Math.Max(11, outputLength));
             await stream.WriteAsync(report, cancellationToken).ConfigureAwait(false);
             await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -403,6 +381,31 @@ internal sealed class WindowsClawControllerSource(ClawOemButtonLatch oemButtons)
     }
 
     public async ValueTask DisposeAsync() => await StopAsync(CancellationToken.None).ConfigureAwait(false);
+
+    private static async Task ObserveReaderAsync(
+        Task reader,
+        CancellationToken cancellationToken,
+        Action<Exception> fault)
+    {
+        try
+        {
+            await reader.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            try
+            {
+                fault(ex);
+            }
+            catch (Exception callbackException) when (callbackException is not OutOfMemoryException)
+            {
+                PluginTrace.Failure("controller", "Controller-reader fault reporting failed", callbackException);
+            }
+        }
+    }
 
     private async Task ReadLoopAsync(
         FileStream stream,

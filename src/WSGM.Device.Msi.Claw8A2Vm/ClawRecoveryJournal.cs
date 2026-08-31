@@ -36,7 +36,7 @@ internal sealed class ClawRecoveryJournal : IAsyncDisposable
     {
         if (string.IsNullOrWhiteSpace(stateDirectory))
         {
-            return Failed("DeviceHost did not provide a writable plugin state directory.");
+            return Failed("WSGM did not provide a writable plugin state directory.");
         }
 
         string path;
@@ -110,6 +110,13 @@ internal sealed class ClawRecoveryJournal : IAsyncDisposable
 
     public bool HasUnrestoredMutation(string serviceId) =>
         _entries.Any(entry => string.Equals(entry.ServiceId, serviceId, StringComparison.Ordinal));
+
+    /// <summary>Gets the exact state captured immediately before a service's first mutation.</summary>
+    /// <param name="serviceId">Service whose outstanding mutation is being restored.</param>
+    /// <returns>The captured state, or null when the service has no outstanding mutation.</returns>
+    public ClawRecoveryState? OriginalStateFor(string serviceId) =>
+        _entries.SingleOrDefault(entry =>
+            string.Equals(entry.ServiceId, serviceId, StringComparison.Ordinal))?.OriginalState;
 
     public async ValueTask<CapabilityReason?> CheckHealthAsync(CancellationToken cancellationToken)
     {

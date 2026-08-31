@@ -574,7 +574,7 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
             };
         }
 
-        if (command.Deadline - DateTimeOffset.UtcNow < TimeSpan.FromSeconds(2))
+        if (!ClawWriteBudget.IsAvailable(command.Deadline))
         {
             return new CapabilityCommandResult
             {
@@ -602,6 +602,24 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
                 payload,
                 cancellationToken).ConfigureAwait(false);
             readback = await ReadAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
+        {
+            // Cancellation can arrive after WriteProfile has reached persistent MCU storage. Finish
+            // the bounded safety rollback with an independent token before reporting the command.
+            RollbackResult rollback = await RollbackAsync(before, restore, CancellationToken.None)
+                .ConfigureAwait(false);
+            PluginTrace.Failure("lighting", "Persistent lighting write was cancelled", exception);
+            return new CapabilityCommandResult
+            {
+                CommandId = command.CommandId,
+                Outcome = CommandOutcome.Indeterminate,
+                Reason = new CapabilityReason(
+                    CapabilityReasonCode.Quiescing,
+                    "The persistent lighting write was cancelled after application began."),
+                Rollback = rollback,
+                CompletedAt = DateTimeOffset.UtcNow,
+            };
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {

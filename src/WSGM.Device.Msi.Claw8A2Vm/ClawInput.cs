@@ -33,8 +33,8 @@ internal sealed class ClawOemButtonLatch
     internal static readonly TimeSpan HoldDuration = TimeSpan.FromMilliseconds(120);
 
     private readonly object _gate = new();
-    private CanonicalButtons _held;
-    private DateTimeOffset _until;
+    private DateTimeOffset _guideUntil;
+    private DateTimeOffset _quickAccessUntil;
 
     /// <summary>Latches one button down for <see cref="HoldDuration"/>.</summary>
     /// <param name="button">The canonical button the press maps to.</param>
@@ -43,8 +43,16 @@ internal sealed class ClawOemButtonLatch
     {
         lock (_gate)
         {
-            _held |= button;
-            _until = now + HoldDuration;
+            DateTimeOffset until = now + HoldDuration;
+            if ((button & CanonicalButtons.Guide) != 0)
+            {
+                _guideUntil = until;
+            }
+
+            if ((button & CanonicalButtons.QuickAccess) != 0)
+            {
+                _quickAccessUntil = until;
+            }
         }
     }
 
@@ -55,18 +63,10 @@ internal sealed class ClawOemButtonLatch
     {
         lock (_gate)
         {
-            if (_held == CanonicalButtons.None)
-            {
-                return CanonicalButtons.None;
-            }
-
-            if (now >= _until)
-            {
-                _held = CanonicalButtons.None;
-                return CanonicalButtons.None;
-            }
-
-            return _held;
+            CanonicalButtons held = CanonicalButtons.None;
+            held |= now < _guideUntil ? CanonicalButtons.Guide : CanonicalButtons.None;
+            held |= now < _quickAccessUntil ? CanonicalButtons.QuickAccess : CanonicalButtons.None;
+            return held;
         }
     }
 }
@@ -123,8 +123,22 @@ internal static class ClawControllerCodec
         };
     }
 
-    public static byte[] EncodeRumble(byte weak, byte strong) =>
-        [0x05, 0x01, 0x00, 0x00, weak, strong, 0x00, 0x00, 0x00, 0x00, 0x00];
+    public static byte[] EncodeRumble(byte weak, byte strong, int reportLength = 11)
+    {
+        if (reportLength < 11)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(reportLength),
+                "The Claw rumble payload needs at least 11 bytes.");
+        }
+
+        byte[] report = new byte[reportLength];
+        report[0] = 0x05;
+        report[1] = 0x01;
+        report[4] = weak;
+        report[5] = strong;
+        return report;
+    }
 
     private static bool IsSet(byte value, int bit) => (value & (1 << bit)) != 0;
 

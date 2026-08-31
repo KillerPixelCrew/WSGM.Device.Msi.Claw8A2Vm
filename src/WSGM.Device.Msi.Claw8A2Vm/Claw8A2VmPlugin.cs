@@ -6,7 +6,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using WSGM.Device.Sdk.Capabilities;
 using WSGM.Device.Sdk.Input;
-using WSGM.Device.Sdk.Ipc;
 using WSGM.Device.Sdk.Lifecycle;
 using WSGM.Device.Sdk.Plugin;
 
@@ -102,12 +101,12 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 ClawHardwareFacts.DeviceDefinitionId,
                 StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("DeviceHost supplied a different device definition.");
+            throw new InvalidOperationException("WSGM supplied a different device definition.");
         }
 
         if (context.CycleGeneration != context.Host.CycleGeneration)
         {
-            throw new InvalidOperationException("DeviceHost supplied an inconsistent cycle generation.");
+            throw new InvalidOperationException("WSGM supplied an inconsistent cycle generation.");
         }
 
         // Installed before the first hardware read, because startup is when the failures worth
@@ -253,8 +252,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
 
             if (_host is not null && result.Outcome is CommandOutcome.AppliedVerified)
             {
-                await RefreshObservedAsync(command.CapabilityId, CancellationToken.None).ConfigureAwait(false);
-                await PublishCapabilityStatesAsync(CancellationToken.None).ConfigureAwait(false);
+                await PublishPostCommandObservationAsync(command.CapabilityId).ConfigureAwait(false);
             }
 
             return result;
@@ -409,7 +407,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             long previousCycleGeneration = _cycleGeneration;
             _controller.Enabled = context.Enabled;
             _cycleGeneration = context.CycleGeneration;
-            // DeviceHost advances the adapter to a fresh cycle generation when controller
+            // WSGM advances the adapter to a fresh cycle generation when controller
             // management is switched on, and that resets the descriptor generation it will accept.
             // Rebuilding and republishing the surface first is what makes the states below valid —
             // without it the very first state after a successful hardware acquisition was rejected
@@ -506,14 +504,25 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             // display is held by the graphics driver rather than by anything StopServicesAsync
             // releases. Leaving variable refresh off after WSGM exits would be a change the user
             // never made and has no obvious way to undo.
+            bool displayRestored = true;
             if (_arcSync is not null)
             {
-                _ = _arcSync.Restore();
+                displayRestored = _arcSync.Restore();
                 _arcSync.Dispose();
                 _arcSync = null;
             }
 
             PluginStopResult result = CurrentStopResult();
+            if (!displayRestored && result.Status is not PluginStopStatus.Failed)
+            {
+                result = new PluginStopResult
+                {
+                    Status = PluginStopStatus.Failed,
+                    Reason = new CapabilityReason(
+                        CapabilityReasonCode.TransportFaulted,
+                        "The panel's captured variable-refresh profile could not be restored."),
+                };
+            }
             _active = false;
             _descriptorSet = null;
             _serviceStatuses = [];
@@ -1648,6 +1657,28 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         }
     }
 
+    /// <summary>Publishes best-effort fresh state after a command already verified its own write.</summary>
+    /// <remarks>
+    /// Capability handlers own command verification. This secondary refresh updates adjacent rows
+    /// such as paired power and fan telemetry; losing it must not rewrite a verified command result
+    /// or terminate the plugin cycle.
+    /// </remarks>
+    private async ValueTask PublishPostCommandObservationAsync(string capabilityId)
+    {
+        try
+        {
+            await RefreshObservedAsync(capabilityId, CancellationToken.None).ConfigureAwait(false);
+            await PublishCapabilityStatesAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            PluginTrace.Failure(
+                "observation",
+                $"Post-command refresh for '{capabilityId}' failed; the verified command result is retained",
+                ex);
+        }
+    }
+
     private async ValueTask<CapabilityCommandResult> JournalCommandAsync(
         string serviceId,
         string firmwareIdentity,
@@ -1661,7 +1692,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             throw new InvalidOperationException("The recovery journal is unavailable.");
         }
 
-        RequireCommandWriteBudget(command.Deadline);
+        ClawWriteBudget.Require(command.Deadline, "journalled command preparation");
         ClawRecoveryState originalState = await readOriginal(cancellationToken).ConfigureAwait(false);
         ClawRecoveryOperation operation = await _journal.BeginAsync(
             serviceId,
@@ -1669,18 +1700,10 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             firmwareIdentity,
             originalState,
             cancellationToken).ConfigureAwait(false);
-        RequireCommandWriteBudget(command.Deadline);
-        CapabilityCommandResult result;
-        try
-        {
-            result = await apply(command, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
-        {
-            // A transport exception does not prove whether the firmware accepted a write. Keep the
-            // exact pre-command value outstanding for recovery.
-            throw;
-        }
+        ClawWriteBudget.Require(command.Deadline, "journalled hardware application");
+        // A transport exception does not prove whether the firmware accepted a write. Let it
+        // propagate while the exact pre-command journal entry remains outstanding for recovery.
+        CapabilityCommandResult result = await apply(command, cancellationToken).ConfigureAwait(false);
 
         _ = await _journal.CompleteCommandAsync(operation, result, CancellationToken.None)
             .ConfigureAwait(false);
@@ -1849,15 +1872,6 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         ServiceIds.Controller => _controller,
         _ => null,
     };
-
-    private static void RequireCommandWriteBudget(DateTimeOffset deadline)
-    {
-        if (deadline - DateTimeOffset.UtcNow < TimeSpan.FromSeconds(2))
-        {
-            throw new OperationCanceledException(
-                "Insufficient command budget for a journalled hardware write.");
-        }
-    }
 
     private ClawCycleContext OperationContext(DateTimeOffset deadline) =>
         new(_cycleGeneration, deadline);
@@ -2154,7 +2168,9 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             CommandId = command.CommandId,
             Outcome = CommandOutcome.Indeterminate,
             Reason = new CapabilityReason(CapabilityReasonCode.TransportFaulted, detail),
-            Rollback = RollbackResult.RestoredUnverified,
+            // Admission succeeded and the handler failed without confirming a rollback. Journalled
+            // resources remain outstanding, so claiming any restoration here would be fabricated.
+            Rollback = RollbackResult.RestoreFailed,
             CompletedAt = DateTimeOffset.UtcNow,
         };
 

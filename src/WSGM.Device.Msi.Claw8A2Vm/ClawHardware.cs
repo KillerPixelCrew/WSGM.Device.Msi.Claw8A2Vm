@@ -24,7 +24,6 @@ internal static class ClawHardwareFacts
     public const byte PowerBoostAddress = 0x51;
     public const byte ScenarioAddress = 0xD2;
     public const byte FanCustomAddress = 0xD4;
-    public const byte ChargeLimitAddress = 0xD7;
     public const byte FanFullSpeedAddress = 0x98;
 
     public const ushort LightingProfileAddress = 0x024A;
@@ -54,10 +53,7 @@ internal sealed record ClawIdentityState
 
 internal sealed record PowerPair(int SustainedWatts, int BoostWatts, byte Scenario);
 
-internal sealed record FanTable(byte[] DutyBuffer, byte[] TemperatureBuffer)
-{
-    public FanTable Copy() => new([.. DutyBuffer], [.. TemperatureBuffer]);
-}
+internal sealed record FanTable(byte[] DutyBuffer, byte[] TemperatureBuffer);
 
 internal sealed record FanSnapshot(
     FanTable Left,
@@ -133,8 +129,6 @@ internal interface IClawMcuTransport : IAsyncDisposable
         ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken);
 
-    ValueTask<ClawControllerMode> ReadModeAsync(CancellationToken cancellationToken);
-
     ValueTask<ControllerTopology> SwitchModeAsync(
         ClawControllerMode mode,
         string physicalLocation,
@@ -149,6 +143,7 @@ internal interface IClawControllerSource : IAsyncDisposable
     ValueTask StartAsync(
         long cycleGeneration,
         Func<CanonicalControllerSample, ValueTask> publish,
+        Action<Exception> fault,
         CancellationToken cancellationToken);
 
     ValueTask StopAsync(CancellationToken cancellationToken);
@@ -181,3 +176,24 @@ internal sealed record ClawHardwareServices(
     IClawMotionSource Motion,
     IFirmwareChordSuppressor ChordSuppressor,
     ClawOemButtonLatch OemButtons);
+
+/// <summary>Applies the one minimum budget required before any Claw hardware write.</summary>
+/// <remarks>
+/// Two seconds covers the slowest journal flush plus one bounded firmware exchange. Keeping this
+/// threshold here prevents lifecycle, command, lighting, and mode-switch paths from drifting apart.
+/// </remarks>
+internal static class ClawWriteBudget
+{
+    internal static readonly TimeSpan Minimum = TimeSpan.FromSeconds(2);
+
+    internal static bool IsAvailable(DateTimeOffset deadline) =>
+        deadline - DateTimeOffset.UtcNow >= Minimum;
+
+    internal static void Require(DateTimeOffset deadline, string operation)
+    {
+        if (!IsAvailable(deadline))
+        {
+            throw new OperationCanceledException($"Insufficient budget for {operation}.");
+        }
+    }
+}

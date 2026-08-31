@@ -4,7 +4,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using WSGM.Device.Sdk.Capabilities;
 using WSGM.Device.Sdk.Input;
-using WSGM.Device.Sdk.Ipc;
 using WSGM.Device.Sdk.Lifecycle;
 using WSGM.Device.Sdk.Plugin;
 
@@ -63,13 +62,6 @@ internal abstract class ClawServiceStatus(string serviceId)
         return new ClawServiceResult(state, reason);
     }
 
-    protected static void RequireWriteBudget(DateTimeOffset deadline)
-    {
-        if (deadline - DateTimeOffset.UtcNow < TimeSpan.FromSeconds(2))
-        {
-            throw new OperationCanceledException("Insufficient lifecycle budget for a journalled hardware write.");
-        }
-    }
 }
 
 internal sealed class OemEventService(
@@ -164,8 +156,6 @@ internal sealed class PowerService(
     private readonly IClawIdentityReader _identity = identity ?? throw new ArgumentNullException(nameof(identity));
     private readonly ClawA2VmPowerCapability _capability = capability ?? throw new ArgumentNullException(nameof(capability));
     private readonly ClawRecoveryJournal _journal = journal ?? throw new ArgumentNullException(nameof(journal));
-    private PowerPair? _restoreSnapshot;
-
     public PowerPair? LastObserved { get; private set; }
 
     public async ValueTask<ClawServiceResult> AcquireAsync(
@@ -184,7 +174,6 @@ internal sealed class PowerService(
         }
 
         LastObserved = await _capability.ReadAsync(cancellationToken).ConfigureAwait(false);
-        _restoreSnapshot ??= LastObserved;
         return Set(ClawServiceState.Owned);
     }
 
@@ -200,17 +189,24 @@ internal sealed class PowerService(
             return Set(ClawServiceState.Faulted, ReconciliationBlockReason);
         }
 
-        if (_restoreSnapshot is null || State is not ClawServiceState.Owned
-            || !_journal.HasUnrestoredMutation(ServiceId))
+        if (State is not ClawServiceState.Owned || !_journal.HasUnrestoredMutation(ServiceId))
         {
             return Set(ClawServiceState.Idle);
         }
 
-        RequireWriteBudget(context.Deadline);
+        if (!ClawRecoveryValues.TryPower(_journal.OriginalStateFor(ServiceId), out PowerPair? restoreSnapshot)
+            || restoreSnapshot is null)
+        {
+            return Set(ClawServiceState.Faulted, new CapabilityReason(
+                CapabilityReasonCode.TransportFaulted,
+                "The power recovery record did not contain its pre-mutation snapshot."));
+        }
+
+        ClawWriteBudget.Require(context.Deadline, "journalled power restoration");
         bool restored;
         try
         {
-            restored = await _capability.RestoreAsync(_restoreSnapshot, cancellationToken)
+            restored = await _capability.RestoreAsync(restoreSnapshot, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch
@@ -250,8 +246,6 @@ internal sealed class FanService(
     private readonly IClawIdentityReader _identity = identity ?? throw new ArgumentNullException(nameof(identity));
     private readonly ClawA2VmFanCapability _capability = capability ?? throw new ArgumentNullException(nameof(capability));
     private readonly ClawRecoveryJournal _journal = journal ?? throw new ArgumentNullException(nameof(journal));
-    private FanSnapshot? _restoreSnapshot;
-
     public FanSnapshot? LastObserved { get; private set; }
 
     public async ValueTask<ClawServiceResult> AcquireAsync(
@@ -274,7 +268,6 @@ internal sealed class FanService(
         }
 
         LastObserved = await _capability.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
-        _restoreSnapshot ??= LastObserved;
         return Set(ClawServiceState.Owned);
     }
 
@@ -290,17 +283,24 @@ internal sealed class FanService(
             return Set(ClawServiceState.Faulted, ReconciliationBlockReason);
         }
 
-        if (_restoreSnapshot is null || State is not ClawServiceState.Owned
-            || !_journal.HasUnrestoredMutation(ServiceId))
+        if (State is not ClawServiceState.Owned || !_journal.HasUnrestoredMutation(ServiceId))
         {
             return Set(ClawServiceState.Idle);
         }
 
-        RequireWriteBudget(context.Deadline);
+        if (!ClawRecoveryValues.TryFans(_journal.OriginalStateFor(ServiceId), out FanSnapshot? restoreSnapshot)
+            || restoreSnapshot is null)
+        {
+            return Set(ClawServiceState.Faulted, new CapabilityReason(
+                CapabilityReasonCode.TransportFaulted,
+                "The fan recovery record did not contain its pre-mutation snapshot."));
+        }
+
+        ClawWriteBudget.Require(context.Deadline, "journalled fan restoration");
         bool restored;
         try
         {
-            restored = await _capability.RestoreAsync(_restoreSnapshot, cancellationToken)
+            restored = await _capability.RestoreAsync(restoreSnapshot, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch
@@ -607,7 +607,7 @@ internal sealed class ControllerService(
         _current = observed;
         if (_current.Mode is not ClawControllerMode.DirectInput)
         {
-            RequireWriteBudget(context.Deadline);
+            ClawWriteBudget.Require(context.Deadline, "controller mode acquisition");
             _ = await _journal.BeginAsync(
                 ServiceId,
                 CapabilityIds.Controller,
@@ -675,6 +675,7 @@ internal sealed class ControllerService(
             await _source.StartAsync(
                 context.CycleGeneration,
                 PublishControllerSampleAsync,
+                ReportControllerReaderFault,
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -699,12 +700,24 @@ internal sealed class ControllerService(
         return Set(ClawServiceState.Owned);
     }
 
+    private void ReportControllerReaderFault(Exception exception)
+    {
+        CapabilityReason reason = new(
+            CapabilityReasonCode.TransportFaulted,
+            $"The controller reader stopped ({exception.GetType().Name}): {exception.Message}");
+        Fault(reason);
+        _host.ReportFault("controller", reason.Detail ?? "The controller reader stopped.");
+    }
+
     public async ValueTask<ClawServiceResult> SuspendAsync(
         ClawCycleContext context,
         CancellationToken cancellationToken)
     {
-        await StopOutputAndAcquisitionAsync(cancellationToken).ConfigureAwait(false);
-        return Set(ClawServiceState.Idle);
+        CapabilityReason? stopFailure = await StopOutputAndAcquisitionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return stopFailure is null
+            ? Set(ClawServiceState.Idle)
+            : Set(ClawServiceState.Faulted, stopFailure);
     }
 
     public ValueTask<ClawServiceResult> ResumeAsync(
@@ -729,7 +742,8 @@ internal sealed class ControllerService(
         CancellationToken cancellationToken)
     {
         _ = Set(ClawServiceState.Releasing);
-        await StopOutputAndAcquisitionAsync(cancellationToken).ConfigureAwait(false);
+        CapabilityReason? stopFailure = await StopOutputAndAcquisitionAsync(cancellationToken)
+            .ConfigureAwait(false);
         if (ReconciliationBlockReason is not null)
         {
             _ = Set(ClawServiceState.ReleasedUnverified, ReconciliationBlockReason);
@@ -752,13 +766,19 @@ internal sealed class ControllerService(
                 return ControllerHandoffResult.ReleasedUnverified;
             }
 
+            if (stopFailure is not null)
+            {
+                _ = Set(ClawServiceState.ReleasedUnverified, stopFailure);
+                return ControllerHandoffResult.ReleasedUnverified;
+            }
+
             _ = Set(ClawServiceState.Idle);
             return ControllerHandoffResult.ReleasedVerified;
         }
 
         if (_current.Mode != _original.Mode)
         {
-            RequireWriteBudget(deadline);
+            ClawWriteBudget.Require(deadline, "controller mode restoration");
             ControllerTopology restored;
             try
             {
@@ -804,12 +824,18 @@ internal sealed class ControllerService(
 
         LastReleasedDevices = _current.PhysicalDevices;
         _current = null;
-        _ = Set(ClawServiceState.Idle);
         _rearButtons = CanonicalButtons.None;
         await _journal.CompleteServiceRestorationAsync(
             ServiceId,
             ClawRecoveryStatus.RestoredVerified,
             cancellationToken).ConfigureAwait(false);
+        if (stopFailure is not null)
+        {
+            _ = Set(ClawServiceState.ReleasedUnverified, stopFailure);
+            return ControllerHandoffResult.ReleasedUnverified;
+        }
+
+        _ = Set(ClawServiceState.Idle);
         return ControllerHandoffResult.ReleasedVerified;
     }
 
@@ -820,7 +846,7 @@ internal sealed class ControllerService(
     /// Two motors and no trigger haptics: the rumble report
     /// (<see cref="ClawControllerCodec.EncodeRumble"/>) carries one weak and one strong byte and
     /// nothing else. The frame rate matches this service's own 4 ms write gate below, so WSGM's
-    /// output router paces frames instead of the plugin dropping them after they crossed the pipe.
+    /// output router paces frames before they reach this device boundary.
     /// </remarks>
     private static readonly HapticCapabilities OutputCapabilities = new()
     {
@@ -845,6 +871,7 @@ internal sealed class ControllerService(
 
             byte weak = ToByte(frame.HighFrequency);
             byte strong = ToByte(frame.LowFrequency);
+            DateTimeOffset now;
             lock (_hapticGate)
             {
                 if (weak == _lastWeak && strong == _lastStrong)
@@ -852,19 +879,21 @@ internal sealed class ControllerService(
                     return;
                 }
 
-                DateTimeOffset now = DateTimeOffset.UtcNow;
+                now = DateTimeOffset.UtcNow;
                 if ((weak != 0 || strong != 0)
                     && now - _lastHapticWrite < TimeSpan.FromMilliseconds(4))
                 {
                     return;
                 }
+            }
 
+            await _source.WriteRumbleAsync(weak, strong, cancellationToken).ConfigureAwait(false);
+            lock (_hapticGate)
+            {
                 _lastWeak = weak;
                 _lastStrong = strong;
                 _lastHapticWrite = now;
             }
-
-            await _source.WriteRumbleAsync(weak, strong, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -872,8 +901,10 @@ internal sealed class ControllerService(
         }
     }
 
-    private async ValueTask StopOutputAndAcquisitionAsync(CancellationToken cancellationToken)
+    private async ValueTask<CapabilityReason?> StopOutputAndAcquisitionAsync(
+        CancellationToken cancellationToken)
     {
+        CapabilityReason? failure = null;
         bool ownsOutput = false;
         try
         {
@@ -886,6 +917,10 @@ internal sealed class ControllerService(
             catch (Exception ex) when (ex is not OutOfMemoryException)
             {
                 // The device may already be gone; acquisition cleanup and mode restoration continue.
+                _host.Trace(
+                    DeviceTraceLevel.Warn,
+                    "controller",
+                    $"zero-rumble write during release failed: {ex.GetType().Name}: {ex.Message}");
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -908,6 +943,13 @@ internal sealed class ControllerService(
         {
             // The physical source may have vanished. Continue to the independently bounded mode
             // restoration, which is the cleanup step that keeps external input usable.
+            failure = new CapabilityReason(
+                CapabilityReasonCode.TransportFaulted,
+                $"The controller source did not stop cleanly ({ex.GetType().Name}: {ex.Message}).");
+            _host.Trace(
+                DeviceTraceLevel.Error,
+                "controller",
+                failure.Detail ?? "The controller source did not stop cleanly.");
         }
         lock (_hapticGate)
         {
@@ -915,6 +957,8 @@ internal sealed class ControllerService(
             _lastStrong = 0;
             _lastHapticWrite = DateTimeOffset.UtcNow;
         }
+
+        return failure;
     }
 
     private async ValueTask PublishControllerSampleAsync(CanonicalControllerSample sample)
