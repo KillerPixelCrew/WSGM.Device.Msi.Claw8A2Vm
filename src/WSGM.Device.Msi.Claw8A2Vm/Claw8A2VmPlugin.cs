@@ -21,6 +21,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     private IReadOnlyList<ClawServiceStatus> _serviceStatuses = [];
     private OemEventService? _oem;
     private PowerService? _power;
+    private ChargeLimitService? _chargeLimit;
     private FanService? _fans;
     private TelemetryService? _telemetry;
     private LightingService? _lighting;
@@ -30,6 +31,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     private DisplayService? _arcSync;
     private ClawRecoveryJournal? _journal;
     private ClawA2VmPowerCapability? _powerCapability;
+    private ClawA2VmChargeLimitCapability? _chargeLimitCapability;
     private ClawA2VmFanCapability? _fanCapability;
     private ClawA2VmLightingCapability? _lightingCapability;
     private long _cycleGeneration;
@@ -128,15 +130,18 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         _quiescing = false;
 
         var powerCapability = new ClawA2VmPowerCapability(_services.Wmi);
+        var chargeLimitCapability = new ClawA2VmChargeLimitCapability(_services.Wmi);
         var fanCapability = new ClawA2VmFanCapability(_services.Wmi);
         var lightingCapability = new ClawA2VmLightingCapability(_services.Mcu);
         _powerCapability = powerCapability;
+        _chargeLimitCapability = chargeLimitCapability;
         _fanCapability = fanCapability;
         _lightingCapability = lightingCapability;
         _journal = await ClawRecoveryJournal.OpenAsync(context.StateDirectory, cancellationToken)
             .ConfigureAwait(false);
         _oem = new OemEventService(_services.OemEvents, context.Host, _services.OemButtons);
         _power = new PowerService(_services.Identity, powerCapability, _journal);
+        _chargeLimit = new ChargeLimitService(_services.Identity, chargeLimitCapability);
         _fans = new FanService(_services.Identity, fanCapability, _journal);
         _telemetry = new TelemetryService(_services.Identity, fanCapability);
         _lighting = new LightingService(_services.Identity, _services.Mcu, lightingCapability);
@@ -162,6 +167,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         [
             _oem,
             _power,
+            _chargeLimit,
             _fans,
             _telemetry,
             _lighting,
@@ -322,7 +328,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             await ResumeServicesAsync(
                 OperationContext(context.Deadline),
                 cancellationToken).ConfigureAwait(false);
-            if (_host is null || _powerCapability is null || _fanCapability is null
+            if (_host is null || _powerCapability is null || _chargeLimitCapability is null
+                || _fanCapability is null
                 || _lightingCapability is null)
             {
                 throw new InvalidOperationException("Resume cannot rebuild the capability surface.");
@@ -585,6 +592,10 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 .ConfigureAwait(false);
             await StartOneAsync(_power!, () => _power!.AcquireAsync(context, cancellationToken), cancellationToken)
                 .ConfigureAwait(false);
+            await StartOneAsync(
+                _chargeLimit!,
+                () => _chargeLimit!.AcquireAsync(context, cancellationToken),
+                cancellationToken).ConfigureAwait(false);
             await StartOneAsync(_fans!, () => _fans!.AcquireAsync(context, cancellationToken), cancellationToken)
                 .ConfigureAwait(false);
             await StartOneAsync(
@@ -643,6 +654,10 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             .ConfigureAwait(false);
         await StartOneAsync(_power!, () => _power!.AcquireAsync(context, cancellationToken), cancellationToken)
             .ConfigureAwait(false);
+        await StartOneAsync(
+            _chargeLimit!,
+            () => _chargeLimit!.AcquireAsync(context, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
         await StartOneAsync(_fans!, () => _fans!.AcquireAsync(context, cancellationToken), cancellationToken)
             .ConfigureAwait(false);
         await StartOneAsync(
@@ -690,6 +705,10 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             cancellationToken).ConfigureAwait(false);
         await StopOneAsync(_fans!, () => _fans!.ReleaseAsync(context, cancellationToken), cancellationToken)
             .ConfigureAwait(false);
+        await StopOneAsync(
+            _chargeLimit!,
+            () => _chargeLimit!.ReleaseAsync(context, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
         await StopOneAsync(_power!, () => _power!.ReleaseAsync(context, cancellationToken), cancellationToken)
             .ConfigureAwait(false);
         await StopOneAsync(_oem!, () => _oem!.ReleaseAsync(context, cancellationToken), cancellationToken)
@@ -781,7 +800,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
 
     private void RequireServices()
     {
-        if (_oem is null || _power is null || _fans is null || _telemetry is null
+        if (_oem is null || _power is null || _chargeLimit is null || _fans is null || _telemetry is null
             || _lighting is null || _motion is null || _controller is null || _suppressor is null)
         {
             throw new InvalidOperationException("Claw services have not been created.");
@@ -813,7 +832,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
 
     private void BuildCapabilitySurface()
     {
-        if (_power is null || _fans is null || _telemetry is null || _lighting is null
+        if (_power is null || _chargeLimit is null || _fans is null || _telemetry is null
+            || _lighting is null
             || _motion is null || _controller is null)
         {
             throw new InvalidOperationException("Services must exist before descriptors are built.");
@@ -826,6 +846,13 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 DisplayKey.SustainedPowerLimit, 8, 37, CapabilityUnit.Watt, writable: true),
             IntegerDescriptor(CapabilityIds.PowerBoost, CapabilityRole.PowerSlowLimit,
                 DisplayKey.BoostPowerLimit, 8, 37, CapabilityUnit.Watt, writable: true),
+            IntegerDescriptor(CapabilityIds.ChargeLimit, CapabilityRole.ChargeLimit,
+                DisplayKey.ChargeLimit,
+                ClawA2VmChargeLimitCapability.MinimumPercent,
+                ClawA2VmChargeLimitCapability.MaximumPercent,
+                CapabilityUnit.Percent,
+                writable: true,
+                persistence: CapabilityPersistence.DevicePersistent),
             ChoiceDescriptor(
                 CapabilityIds.Scenario,
                 CapabilityRole.ScenarioMode,
@@ -983,6 +1010,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     {
         ClawA2VmPowerCapability power = _powerCapability
             ?? throw new InvalidOperationException("The power capability is unavailable.");
+        ClawA2VmChargeLimitCapability chargeLimit = _chargeLimitCapability
+            ?? throw new InvalidOperationException("The charge-limit capability is unavailable.");
         ClawA2VmFanCapability fans = _fanCapability
             ?? throw new InvalidOperationException("The fan capability is unavailable.");
         ClawA2VmLightingCapability lighting = _lightingCapability
@@ -1011,6 +1040,10 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                     journalCommand,
                     journalCommand.RequestedValue!.IntegerValue!.Value,
                     token),
+                cancellationToken),
+            CapabilityIds.ChargeLimit => chargeLimit.ApplyAsync(
+                command,
+                command.RequestedValue!.IntegerValue!.Value,
                 cancellationToken),
             CapabilityIds.FanMode => JournalCommandAsync(
                 ServiceIds.Fans,
@@ -1114,6 +1147,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     private ClawServiceStatus? ServiceForCapability(string capabilityId) => capabilityId switch
     {
         CapabilityIds.PowerSustained or CapabilityIds.PowerBoost or CapabilityIds.Scenario => _power,
+        CapabilityIds.ChargeLimit => _chargeLimit,
         CapabilityIds.FanMode or CapabilityIds.FanCurve => _fans,
         CapabilityIds.FanRpm or CapabilityIds.Temperature => _telemetry,
         CapabilityIds.LightingBrightness or CapabilityIds.LightingColor => _lighting,
@@ -1453,6 +1487,11 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             return _power!.LastObserved is { } value ? Scenario(value.Scenario) : null;
         }
 
+        if (descriptor.CapabilityId == CapabilityIds.ChargeLimit)
+        {
+            return _chargeLimit!.LastObserved is { } value ? Integer(value.Percent) : null;
+        }
+
         if (descriptor.CapabilityId == CapabilityIds.FanMode)
         {
             return _fans!.LastObserved is { } value ? FanMode(value) : null;
@@ -1622,6 +1661,11 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             await _power.RefreshAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        if (_chargeLimit is { State: ClawServiceState.Owned })
+        {
+            await _chargeLimit.RefreshAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         if (_fans is { State: ClawServiceState.Owned })
         {
             await _fans.RefreshAsync(cancellationToken).ConfigureAwait(false);
@@ -1645,6 +1689,10 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         if (capabilityId is CapabilityIds.PowerSustained or CapabilityIds.PowerBoost)
         {
             await _power!.RefreshAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else if (capabilityId == CapabilityIds.ChargeLimit)
+        {
+            await _chargeLimit!.RefreshAsync(cancellationToken).ConfigureAwait(false);
         }
         else if (capabilityId is CapabilityIds.FanMode or CapabilityIds.FanCurve)
         {

@@ -187,6 +187,33 @@ public sealed class ClawPluginTests
         Assert.Equal(50, restored.Brightness);
     }
 
+    [Theory]
+    [InlineData(60)]
+    [InlineData(80)]
+    [InlineData(100)]
+    public async Task ApplyChargeLimit_WritesPercentageAndVerifiesReadback(int percent)
+    {
+        FakeWmiTransport wmi = new();
+        ClawA2VmChargeLimitCapability chargeLimit = new(wmi);
+        CapabilityCommand command = Command(
+            CapabilityIds.ChargeLimit,
+            instanceId: null,
+            new CapabilityValue
+            {
+                Kind = CapabilityValueKind.Integer,
+                IntegerValue = percent,
+            });
+
+        CapabilityCommandResult result = await chargeLimit.ApplyAsync(
+            command,
+            percent,
+            CancellationToken.None);
+
+        Assert.Equal(CommandOutcome.AppliedVerified, result.Outcome);
+        Assert.Equal(percent, result.ReadbackValue?.IntegerValue);
+        Assert.Equal(percent, wmi.ReadData(ClawHardwareFacts.ChargeLimitAddress));
+    }
+
     [Fact]
     public void Observe_FirmwareOrphanGUp_SuppressesButRealAndModifiedChordsPass()
     {
@@ -271,6 +298,10 @@ public sealed class ClawPluginTests
         Assert.Contains(descriptors.Descriptors, descriptor =>
             descriptor.CapabilityId == CapabilityIds.PowerSustained);
         Assert.Contains(descriptors.Descriptors, descriptor =>
+            descriptor.CapabilityId == CapabilityIds.ChargeLimit
+            && descriptor.Role == CapabilityRole.ChargeLimit
+            && descriptor.Persistence == CapabilityPersistence.DevicePersistent);
+        Assert.Contains(descriptors.Descriptors, descriptor =>
             descriptor.CapabilityId == CapabilityIds.LightingColor
             && descriptor.InstanceId == CapabilityInstances.Buttons);
         Assert.Equal(descriptors.Descriptors.Count, host.CapabilityStates.Count);
@@ -278,6 +309,10 @@ public sealed class ClawPluginTests
             capability.CapabilityId == CapabilityIds.PowerSustained
             && capability.Available
             && capability.ObservedValue?.IntegerValue == 30);
+        Assert.Contains(host.CapabilityStates, capability =>
+            capability.CapabilityId == CapabilityIds.ChargeLimit
+            && capability.Available
+            && capability.ObservedValue?.IntegerValue == 80);
         Assert.Contains(host.CapabilityStates, capability =>
             capability.CapabilityId == CapabilityIds.Controller
             && !capability.Available);
@@ -339,6 +374,35 @@ public sealed class ClawPluginTests
             state.Root,
             CancellationToken.None);
         Assert.Empty(completed.OutstandingEntries);
+    }
+
+    [Fact]
+    public async Task ExecuteCommandAsync_ChargeLimitPersistsAcrossPluginStop()
+    {
+        using TemporaryDirectory state = new();
+        FakeWmiTransport wmi = new();
+        await using Claw8A2VmPlugin plugin = new(CreateServices(wmi));
+        TestPluginHostAdapter host = new(CycleGeneration);
+        _ = await plugin.StartAsync(StartContext(host, state.Root), CancellationToken.None);
+        CapabilityCommand command = Command(
+            CapabilityIds.ChargeLimit,
+            instanceId: null,
+            new CapabilityValue
+            {
+                Kind = CapabilityValueKind.Integer,
+                IntegerValue = 60,
+            });
+
+        CapabilityCommandResult result = await plugin.ExecuteCommandAsync(command, CancellationToken.None);
+        PluginStopResult stop = await plugin.StopAsync(
+            new PluginStopContext(
+                PluginStopReason.IntegrationDisabled,
+                DateTimeOffset.UtcNow.AddSeconds(10)),
+            CancellationToken.None);
+
+        Assert.Equal(CommandOutcome.AppliedVerified, result.Outcome);
+        Assert.Equal(PluginStopStatus.Clean, stop.Status);
+        Assert.Equal(60, wmi.ReadData(ClawHardwareFacts.ChargeLimitAddress));
     }
 
     [Fact]
@@ -623,6 +687,7 @@ internal sealed class FakeWmiTransport : IMsiWmiTransport
         SetData(ClawHardwareFacts.ScenarioAddress, 0xC1);
         SetData(ClawHardwareFacts.FanCustomAddress, 0);
         SetData(ClawHardwareFacts.FanFullSpeedAddress, 2);
+        SetData(ClawHardwareFacts.ChargeLimitAddress, 80);
         _responses[("Get_Fan", 0)] = Response(0, 0xC7, 0, 0xCF);
         _responses[("Get_Temperature", 0)] = Response(52);
         _responses[("Get_Fan", 1)] = Table(0xA1, 0, 40, 49, 58, 67, 75, 0xA8);

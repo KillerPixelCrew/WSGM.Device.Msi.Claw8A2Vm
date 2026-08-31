@@ -25,6 +25,7 @@ internal static class ClawHardwareFacts
     public const byte ScenarioAddress = 0xD2;
     public const byte FanCustomAddress = 0xD4;
     public const byte FanFullSpeedAddress = 0x98;
+    public const byte ChargeLimitAddress = 0xD7;
 
     public const ushort LightingProfileAddress = 0x024A;
     public const int McuReportLength = 64;
@@ -52,6 +53,8 @@ internal sealed record ClawIdentityState
 }
 
 internal sealed record PowerPair(int SustainedWatts, int BoostWatts, byte Scenario);
+
+internal sealed record ChargeLimitState(int Percent, byte RawValue);
 
 internal sealed record FanTable(byte[] DutyBuffer, byte[] TemperatureBuffer);
 

@@ -1,8 +1,8 @@
 # WSGM Device Plugin — MSI Claw 8 AI+ A2VM
 
 The device plugin that teaches [WSGM](https://github.com/NightHammer1000/WSGM) an MSI Claw 8 AI+
-A2VM: power limits, fan behaviour, lighting, the controller and its motion sensors, the OEM buttons,
-variable refresh, and the physical glyphs shown in Steam.
+A2VM: power and charge limits, fan behaviour, lighting, the controller and its motion sensors, the
+OEM buttons, variable refresh, and the physical glyphs shown in Steam.
 
 It is also **the reference implementation of the
 [WSGM Device SDK](https://github.com/KillerPixelCrew/WSGM.Device.Sdk)** — the plugin to read, and

@@ -207,6 +207,134 @@ internal sealed class ClawA2VmPowerCapability(IMsiWmiTransport transport)
     };
 }
 
+internal sealed class ClawA2VmChargeLimitCapability(IMsiWmiTransport transport)
+{
+    internal const int MinimumPercent = 60;
+    internal const int MaximumPercent = 100;
+
+    private readonly IMsiWmiTransport _transport = transport ?? throw new ArgumentNullException(nameof(transport));
+
+    public async ValueTask<ChargeLimitState> ReadAsync(CancellationToken cancellationToken)
+    {
+        byte[] response = await _transport.InvokeGetterAsync(
+            "Get_Data",
+            ClawHardwareFacts.ChargeLimitAddress,
+            cancellationToken).ConfigureAwait(false);
+        if (response.Length < 2)
+        {
+            throw new InvalidOperationException("The charge-limit response was truncated.");
+        }
+
+        byte rawValue = response[1];
+        if (rawValue is < MinimumPercent or > MaximumPercent)
+        {
+            throw new InvalidOperationException(
+                $"The charge-limit value {rawValue}% is outside the supported range.");
+        }
+
+        return new ChargeLimitState(rawValue, rawValue);
+    }
+
+    public async ValueTask<CapabilityCommandResult> ApplyAsync(
+        CapabilityCommand command,
+        int percent,
+        CancellationToken cancellationToken)
+    {
+        if (percent is < MinimumPercent or > MaximumPercent)
+        {
+            return Rejected(
+                command,
+                CapabilityReasonCode.ValueOutOfRange,
+                $"The charge limit must be {MinimumPercent}-{MaximumPercent}%.");
+        }
+
+        ChargeLimitState before = await ReadAsync(cancellationToken).ConfigureAwait(false);
+        byte wanted = Encode(percent);
+        try
+        {
+            await WriteRawAsync(wanted, cancellationToken).ConfigureAwait(false);
+            ChargeLimitState readback = await ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (readback.Percent == percent)
+            {
+                return new CapabilityCommandResult
+                {
+                    CommandId = command.CommandId,
+                    Outcome = CommandOutcome.AppliedVerified,
+                    ReadbackValue = Integer(readback.Percent),
+                    CompletedAt = DateTimeOffset.UtcNow,
+                };
+            }
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            // Set_Data does not report whether firmware accepted a timed-out write. The exact raw
+            // byte captured immediately beforehand is the only safe rollback value.
+            PluginTrace.Failure("charge-limit", "Charge-limit write or readback failed", exception);
+        }
+
+        RollbackResult rollback = await TryRestoreAsync(before.RawValue, CancellationToken.None)
+            .ConfigureAwait(false);
+        return new CapabilityCommandResult
+        {
+            CommandId = command.CommandId,
+            Outcome = CommandOutcome.Indeterminate,
+            Reason = new CapabilityReason(
+                CapabilityReasonCode.TransportFaulted,
+                "Charge-limit readback did not match the requested policy."),
+            Rollback = rollback,
+            CompletedAt = DateTimeOffset.UtcNow,
+        };
+    }
+
+    internal static byte Encode(int percent) => checked((byte)percent);
+
+    private async ValueTask<RollbackResult> TryRestoreAsync(
+        byte rawValue,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await WriteRawAsync(rawValue, cancellationToken).ConfigureAwait(false);
+            byte[] response = await _transport.InvokeGetterAsync(
+                "Get_Data",
+                ClawHardwareFacts.ChargeLimitAddress,
+                cancellationToken).ConfigureAwait(false);
+            return response.Length >= 2 && response[1] == rawValue
+                ? RollbackResult.RestoredVerified
+                : RollbackResult.RestoredUnverified;
+        }
+        catch
+        {
+            return RollbackResult.RestoreFailed;
+        }
+    }
+
+    private ValueTask WriteRawAsync(byte rawValue, CancellationToken cancellationToken)
+    {
+        byte[] package = new byte[ClawHardwareFacts.WmiPackageLength];
+        package[0] = ClawHardwareFacts.ChargeLimitAddress;
+        package[1] = rawValue;
+        return _transport.InvokeSetterAsync("Set_Data", package, cancellationToken);
+    }
+
+    private static CapabilityCommandResult Rejected(
+        CapabilityCommand command,
+        CapabilityReasonCode code,
+        string detail) => new()
+        {
+            CommandId = command.CommandId,
+            Outcome = CommandOutcome.Rejected,
+            Reason = new CapabilityReason(code, detail),
+            CompletedAt = DateTimeOffset.UtcNow,
+        };
+
+    private static CapabilityValue Integer(int value) => new()
+    {
+        Kind = CapabilityValueKind.Integer,
+        IntegerValue = value,
+    };
+}
+
 internal sealed class ClawA2VmFanCapability(IMsiWmiTransport transport)
 {
     private static readonly int[] TemperatureOffsets = [1, 4, 5, 6, 7, 8];
@@ -764,6 +892,7 @@ internal static class CapabilityIds
 {
     public const string PowerSustained = "power.primary-limit";
     public const string PowerBoost = "power.boost-limit";
+    public const string ChargeLimit = "battery.charge-limit";
     public const string Scenario = "power.scenario";
     public const string FanMode = "fan.mode";
     public const string FanCurve = "fan.curve";

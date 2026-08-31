@@ -238,6 +238,51 @@ internal sealed class PowerService(
             "The exact MS-1T52 identity no longer matches.");
 }
 
+internal sealed class ChargeLimitService(
+    IClawIdentityReader identity,
+    ClawA2VmChargeLimitCapability capability) : ClawServiceStatus(ServiceIds.ChargeLimit)
+{
+    private readonly IClawIdentityReader _identity = identity ?? throw new ArgumentNullException(nameof(identity));
+    private readonly ClawA2VmChargeLimitCapability _capability = capability
+        ?? throw new ArgumentNullException(nameof(capability));
+
+    public ChargeLimitState? LastObserved { get; private set; }
+
+    public async ValueTask<ClawServiceResult> AcquireAsync(
+        ClawCycleContext context,
+        CancellationToken cancellationToken)
+    {
+        ClawIdentityState identity = await _identity.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (!identity.ExactMachineMatch || !identity.WmiFirmwareVerified)
+        {
+            return Set(ClawServiceState.Passive, FirmwareReason(identity));
+        }
+
+        LastObserved = await _capability.ReadAsync(cancellationToken).ConfigureAwait(false);
+        return Set(ClawServiceState.Owned);
+    }
+
+    public async ValueTask RefreshAsync(CancellationToken cancellationToken) =>
+        LastObserved = await _capability.ReadAsync(cancellationToken).ConfigureAwait(false);
+
+    public ValueTask<ClawServiceResult> ReleaseAsync(
+        ClawCycleContext context,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        LastObserved = null;
+        return ValueTask.FromResult(Set(ClawServiceState.Idle));
+    }
+
+    private static CapabilityReason FirmwareReason(ClawIdentityState identity) => identity.ExactMachineMatch
+        ? new CapabilityReason(
+            CapabilityReasonCode.FirmwareNotVerified,
+            "MSI_ACPI interface 8.0 and EC firmware 1T52EMS1.109 were not both verified.")
+        : new CapabilityReason(
+            CapabilityReasonCode.GenerationChanged,
+            "The exact MS-1T52 identity no longer matches.");
+}
+
 internal sealed class FanService(
     IClawIdentityReader identity,
     ClawA2VmFanCapability capability,
@@ -1156,6 +1201,7 @@ internal static class ServiceIds
 {
     public const string OemEvents = "msi-oem-events";
     public const string Power = "msi-power";
+    public const string ChargeLimit = "msi-charge-limit";
     public const string Fans = "msi-fans";
     public const string Telemetry = "msi-telemetry";
     public const string Lighting = "claw-lighting";
