@@ -177,6 +177,12 @@ internal sealed unsafe class ArcSyncTransport : IDisposable
             return false;
         }
 
+        if (!TryReadProfile(out ArcSyncProfileParams before))
+        {
+            PluginTrace.Warn("arcsync", "Write refused because the current profile could not be snapshotted.");
+            return false;
+        }
+
         ArcSyncProfileParams request = _savedValid ? _saved : default;
         request.Size = (uint)sizeof(ArcSyncProfileParams);
         if (enabled)
@@ -198,16 +204,18 @@ internal sealed unsafe class ArcSyncTransport : IDisposable
             PluginTrace.Warn(
                 "arcsync",
                 $"Profile {request.Profile} refused with 0x{result:x} (wanted enabled={enabled}).");
+            _ = TryRestoreProfile(before, "failed write rollback");
             return false;
         }
 
-        ArcSyncState? readback = Read();
-        if (readback is not { } state || state.Enabled != enabled)
+        if (!TryReadProfile(out ArcSyncProfileParams profileReadback)
+            || (profileReadback.Profile != ProfileOff) != enabled)
         {
             PluginTrace.Warn(
                 "arcsync",
                 $"Profile {request.Profile} applied but read back as "
-                + $"{(readback?.Enabled.ToString() ?? "unreadable")}, wanted {enabled}.");
+                + $"{(profileReadback.Profile != ProfileOff).ToString()}, wanted {enabled}.");
+            _ = TryRestoreProfile(before, "write verification rollback");
             return false;
         }
 
@@ -231,16 +239,7 @@ internal sealed unsafe class ArcSyncTransport : IDisposable
             return true;
         }
 
-        ArcSyncProfileParams restore = _saved;
-        int result = _setProfile(_panel, &restore);
-        if (result != ResultSuccess)
-        {
-            PluginTrace.Error("arcsync", $"Restore of profile {_saved.Profile} failed with 0x{result:x}.");
-            return false;
-        }
-
-        PluginTrace.Info("arcsync", $"Variable refresh restored to profile {_saved.Profile}.");
-        return true;
+        return TryRestoreProfile(_saved, "cycle restore");
     }
 
     /// <inheritdoc />
@@ -381,9 +380,7 @@ internal sealed unsafe class ArcSyncTransport : IDisposable
 
     private void CaptureProfile()
     {
-        ArcSyncProfileParams profile = default;
-        profile.Size = (uint)sizeof(ArcSyncProfileParams);
-        if (_getProfile(_panel, &profile) != ResultSuccess)
+        if (!TryReadProfile(out ArcSyncProfileParams profile))
         {
             PluginTrace.Warn("arcsync", "Profile could not be captured; restore will be skipped.");
             return;
@@ -392,6 +389,47 @@ internal sealed unsafe class ArcSyncTransport : IDisposable
         _saved = profile;
         _savedValid = true;
     }
+
+    private bool TryReadProfile(out ArcSyncProfileParams profile)
+    {
+        ArcSyncProfileParams current = default;
+        current.Size = (uint)sizeof(ArcSyncProfileParams);
+        bool succeeded = _panel != 0 && _getProfile(_panel, &current) == ResultSuccess;
+        profile = current;
+        return succeeded;
+    }
+
+    private bool TryRestoreProfile(ArcSyncProfileParams restore, string operation)
+    {
+        restore.Size = (uint)sizeof(ArcSyncProfileParams);
+        int result = _setProfile(_panel, &restore);
+        if (result != ResultSuccess)
+        {
+            PluginTrace.Error(
+                "arcsync",
+                $"{operation} of profile {restore.Profile} failed with 0x{result:x}.");
+            return false;
+        }
+
+        if (!TryReadProfile(out ArcSyncProfileParams readback) || !ProfilesEqual(restore, readback))
+        {
+            PluginTrace.Error(
+                "arcsync",
+                $"{operation} of profile {restore.Profile} could not be verified by full readback.");
+            return false;
+        }
+
+        PluginTrace.Info("arcsync", $"{operation} restored profile {restore.Profile}, verified.");
+        return true;
+    }
+
+    private static bool ProfilesEqual(ArcSyncProfileParams left, ArcSyncProfileParams right) =>
+        left.Version == right.Version
+        && left.Profile == right.Profile
+        && BitConverter.SingleToInt32Bits(left.MaximumHz) == BitConverter.SingleToInt32Bits(right.MaximumHz)
+        && BitConverter.SingleToInt32Bits(left.MinimumHz) == BitConverter.SingleToInt32Bits(right.MinimumHz)
+        && left.MaxFrameTimeIncreaseUs == right.MaxFrameTimeIncreaseUs
+        && left.MaxFrameTimeDecreaseUs == right.MaxFrameTimeDecreaseUs;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct CtlInitArgs

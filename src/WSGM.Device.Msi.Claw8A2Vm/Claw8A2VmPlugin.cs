@@ -14,6 +14,7 @@ namespace WSGM.Device.Msi.Claw8A2Vm;
 /// <summary>The exact-device plugin for the MSI Claw 8 AI+ A2VM board <c>MS-1T52</c>.</summary>
 public sealed class Claw8A2VmPlugin : IDevicePlugin
 {
+    private const int MaxDiagnosticValueLength = 64;
     private readonly ClawHardwareServices _services;
     private readonly SemaphoreSlim _commandSerializer = new(1, 1);
     private IPluginHostAdapter? _host;
@@ -129,77 +130,80 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         _cycleGeneration = context.CycleGeneration;
         _quiescing = false;
 
-        var powerCapability = new ClawA2VmPowerCapability(_services.Wmi);
-        var chargeLimitCapability = new ClawA2VmChargeLimitCapability(_services.Wmi);
-        var fanCapability = new ClawA2VmFanCapability(_services.Wmi);
-        var lightingCapability = new ClawA2VmLightingCapability(_services.Mcu);
-        _powerCapability = powerCapability;
-        _chargeLimitCapability = chargeLimitCapability;
-        _fanCapability = fanCapability;
-        _lightingCapability = lightingCapability;
-        _journal = await ClawRecoveryJournal.OpenAsync(context.StateDirectory, cancellationToken)
-            .ConfigureAwait(false);
-        _oem = new OemEventService(_services.OemEvents, context.Host, _services.OemButtons);
-        _power = new PowerService(_services.Identity, powerCapability, _journal);
-        _chargeLimit = new ChargeLimitService(_services.Identity, chargeLimitCapability);
-        _fans = new FanService(_services.Identity, fanCapability, _journal);
-        _telemetry = new TelemetryService(_services.Identity, fanCapability);
-        _lighting = new LightingService(_services.Identity, _services.Mcu, lightingCapability);
-        _motion = new MotionService(_services.Motion);
-
-        // Opened before descriptors are built, because whether the variable-refresh row exists at
-        // all depends on whether a capable panel answered.
-        _arcSync = new DisplayService();
-        _ = _arcSync.TryAcquire();
-        _controller = new ControllerService(
-            _services.Identity,
-            _services.Mcu,
-            _services.Controller,
-            _motion,
-            context.Host,
-            _journal)
-        {
-            Enabled = context.ControllerManagementEnabled,
-        };
-        _suppressor = new ChordSuppressorService(_services.ChordSuppressor, _oem);
-
-        _serviceStatuses =
-        [
-            _oem,
-            _power,
-            _chargeLimit,
-            _fans,
-            _telemetry,
-            _lighting,
-            _motion,
-            _controller,
-            _suppressor,
-        ];
-        BuildCapabilitySurface();
-
-        if (_journal.FailureReason is { } journalFailure)
-        {
-            BlockService(ServiceIds.Power, journalFailure);
-            BlockService(ServiceIds.Fans, journalFailure);
-            BlockService(ServiceIds.Controller, journalFailure);
-        }
-        else
-        {
-            await ReconcileOutstandingAsync(
-                _journal.OutstandingEntries,
-                identity,
-                powerCapability,
-                fanCapability,
-                cancellationToken).ConfigureAwait(false);
-        }
-
-        await context.Host.PublishDescriptorsAsync(_descriptorSet!, cancellationToken)
-            .ConfigureAwait(false);
-        await context.Host.PublishOemControlsAsync(CreateOemControls(), cancellationToken)
-            .ConfigureAwait(false);
-
         try
         {
+            var powerCapability = new ClawA2VmPowerCapability(_services.Wmi);
+            var chargeLimitCapability = new ClawA2VmChargeLimitCapability(_services.Wmi);
+            var fanCapability = new ClawA2VmFanCapability(_services.Wmi);
+            var lightingCapability = new ClawA2VmLightingCapability(_services.Mcu);
+            _powerCapability = powerCapability;
+            _chargeLimitCapability = chargeLimitCapability;
+            _fanCapability = fanCapability;
+            _lightingCapability = lightingCapability;
+            _journal = await ClawRecoveryJournal.OpenAsync(context.StateDirectory, cancellationToken)
+                .ConfigureAwait(false);
+            _oem = new OemEventService(_services.OemEvents, context.Host, _services.OemButtons);
+            _power = new PowerService(_services.Identity, powerCapability, _journal);
+            _chargeLimit = new ChargeLimitService(_services.Identity, chargeLimitCapability);
+            _fans = new FanService(_services.Identity, fanCapability, _journal);
+            _telemetry = new TelemetryService(_services.Identity, fanCapability);
+            _lighting = new LightingService(_services.Identity, _services.Mcu, lightingCapability);
+            _motion = new MotionService(_services.Motion);
+
+            // Opened before descriptors are built, because whether the variable-refresh row exists at
+            // all depends on whether a capable panel answered.
+            _arcSync = new DisplayService();
+            _ = _arcSync.TryAcquire();
+            _controller = new ControllerService(
+                _services.Identity,
+                _services.Mcu,
+                _services.Controller,
+                _motion,
+                context.Host,
+                _journal)
+            {
+                Enabled = context.ControllerManagementEnabled,
+            };
+            _suppressor = new ChordSuppressorService(
+                _services.ChordSuppressor,
+                _oem,
+                context.Host);
+
+            _serviceStatuses =
+            [
+                _oem,
+                _power,
+                _chargeLimit,
+                _fans,
+                _telemetry,
+                _lighting,
+                _motion,
+                _controller,
+                _suppressor,
+            ];
+            BuildCapabilitySurface();
+
+            if (_journal.FailureReason is { } journalFailure)
+            {
+                BlockService(ServiceIds.Power, journalFailure);
+                BlockService(ServiceIds.Fans, journalFailure);
+                BlockService(ServiceIds.Controller, journalFailure);
+            }
+            else
+            {
+                await ReconcileOutstandingAsync(
+                    _journal.OutstandingEntries,
+                    identity,
+                    powerCapability,
+                    fanCapability,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            await context.Host.PublishDescriptorsAsync(_descriptorSet!, cancellationToken)
+                .ConfigureAwait(false);
+            await context.Host.PublishOemControlsAsync(CreateOemControls(), cancellationToken)
+                .ConfigureAwait(false);
+
             await StartServicesAsync(
                 new ClawCycleContext(
                     context.CycleGeneration,
@@ -213,6 +217,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         catch
         {
             _quiescing = true;
+            await RollBackFailedStartAsync().ConfigureAwait(false);
             throw;
         }
     }
@@ -369,12 +374,12 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         cancellationToken.ThrowIfCancellationRequested();
         var values = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            ["cycle"] = _active ? "started" : "stopped",
-            ["recovery"] = _journal?.FailureReason is null ? "healthy" : "blocked",
+            ["cycle"] = DiagnosticCycleState(),
+            ["recovery"] = DiagnosticRecoveryState(),
         };
         foreach (ClawServiceStatus service in _serviceStatuses)
         {
-            values[service.ServiceId] = service.State.ToString();
+            values[service.ServiceId] = BoundDiagnosticValue(service.State.ToString());
         }
 
         return ValueTask.FromResult(new PluginDiagnostics { Values = values });
@@ -546,6 +551,169 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             _commandSerializer.Release();
         }
     }
+
+    private async ValueTask RollBackFailedStartAsync()
+    {
+        StopObservationLoop();
+        if (_serviceStatuses.Count > 0)
+        {
+            try
+            {
+                await StopServicesAsync(
+                    new ClawCycleContext(
+                        _cycleGeneration,
+                        DateTimeOffset.UtcNow.AddSeconds(12)),
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                PluginTrace.Error(
+                    "lifecycle",
+                    $"startup rollback could not release every service: "
+                        + $"{ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        if (_arcSync is not null)
+        {
+            try
+            {
+                if (!_arcSync.Restore())
+                {
+                    PluginTrace.Error(
+                        "display",
+                        "startup rollback could not verify the captured variable-refresh profile.");
+                }
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                PluginTrace.Error(
+                    "display",
+                    $"startup rollback failed while restoring variable refresh: "
+                        + $"{ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                _arcSync.Dispose();
+                _arcSync = null;
+            }
+        }
+
+        if (_journal is not null)
+        {
+            try
+            {
+                await _journal.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                PluginTrace.Error(
+                    "recovery",
+                    $"startup rollback could not close the recovery journal: "
+                        + $"{ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                _journal = null;
+            }
+        }
+
+        await RetractFailedStartPublicationsAsync().ConfigureAwait(false);
+
+        _active = false;
+        _descriptorSet = null;
+        _serviceStatuses = [];
+    }
+
+    private async ValueTask RetractFailedStartPublicationsAsync()
+    {
+        if (_host is null)
+        {
+            return;
+        }
+
+        await TryRetractPublicationAsync(
+            "physical devices",
+            () => _host.PublishPhysicalDevicesAsync([], null, CancellationToken.None))
+            .ConfigureAwait(false);
+        await TryRetractPublicationAsync(
+            "OEM controls",
+            () => _host.PublishOemControlsAsync([], CancellationToken.None))
+            .ConfigureAwait(false);
+
+        if (_descriptorSet is not null)
+        {
+            CapabilityDescriptorSet publishedDescriptors = _descriptorSet;
+            await TryRetractPublicationAsync(
+                "capability descriptors",
+                () => _host.PublishDescriptorsAsync(
+                    new CapabilityDescriptorSet
+                    {
+                        Generation = checked(publishedDescriptors.Generation + 1),
+                        CycleGeneration = _cycleGeneration,
+                        Descriptors = [],
+                    },
+                    CancellationToken.None))
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static async ValueTask TryRetractPublicationAsync(
+        string publication,
+        Func<ValueTask> retract)
+    {
+        try
+        {
+            await retract().ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            PluginTrace.Error(
+                "lifecycle",
+                $"startup rollback could not retract {publication}: "
+                    + $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private string DiagnosticCycleState()
+    {
+        if (_disposed)
+        {
+            return "disposed";
+        }
+
+        if (_quiescing)
+        {
+            return _active ? "quiescing" : "stopped";
+        }
+
+        if (_active)
+        {
+            return "started";
+        }
+
+        return _host is not null && _descriptorSet is not null
+            ? "starting"
+            : "stopped";
+    }
+
+    private string DiagnosticRecoveryState()
+    {
+        if (_journal is null)
+        {
+            return "unavailable";
+        }
+
+        if (_journal.FailureReason is not null)
+        {
+            return "blocked";
+        }
+
+        return _journal.OutstandingEntries.Count == 0 ? "healthy" : "pending";
+    }
+
+    private static string BoundDiagnosticValue(string value) =>
+        value.Length <= MaxDiagnosticValueLength ? value : value[..MaxDiagnosticValueLength];
 
     /// <inheritdoc />
     public async ValueTask DisposeAsync()

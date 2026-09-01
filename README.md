@@ -31,7 +31,10 @@ This one is a worked example of the parts that are easy to get wrong:
 
 Every register, report layout and WMI method here was established on a physical device. `PROVENANCE.md`
 records the hardware revision it was confirmed against. A different Claw model is a different device,
-and detection does not claim it.
+and detection does not claim it. Both detection and startup require the exact manufacturer,
+`MS-1T52` baseboard and `1T52.1` SKU. Startup repeats that check from SMBIOS and returns before it
+queries MSI's EC-backed WMI provider, controller inventory, HID endpoints or power state on any
+other machine.
 
 That is the honest constraint of this whole category: nothing here can be derived from a datasheet,
 so nothing here should be trusted on a machine it was not confirmed on.

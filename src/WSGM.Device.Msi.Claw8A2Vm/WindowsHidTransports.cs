@@ -246,7 +246,7 @@ internal sealed class WindowsClawControllerSource(ClawOemButtonLatch oemButtons)
 
     public async ValueTask StartAsync(
         long cycleGeneration,
-        Func<CanonicalControllerSample, ValueTask> publish,
+        Func<CanonicalControllerSample, CancellationToken, ValueTask> publish,
         Action<Exception> fault,
         CancellationToken cancellationToken)
     {
@@ -290,11 +290,19 @@ internal sealed class WindowsClawControllerSource(ClawOemButtonLatch oemButtons)
     public async ValueTask StopAsync(CancellationToken cancellationToken)
     {
         Task? reader;
+        FileStream? stream;
         lock (_gate)
         {
             reader = _readerTask;
             _readerCancellation?.Cancel();
+            stream = _stream;
+            _stream = null;
         }
+
+        // Closing the overlapped handle is the hard stop for a pending HID read. The reader token
+        // was also cancelled above and is passed into the host callback, so a callback waiting on
+        // its bounded publication channel can unwind before this wait.
+        stream?.Dispose();
 
         if (reader is not null)
         {
@@ -328,10 +336,8 @@ internal sealed class WindowsClawControllerSource(ClawOemButtonLatch oemButtons)
 
             lock (_gate)
             {
-                _stream?.Dispose();
                 _endpoint?.Dispose();
                 _readerCancellation?.Dispose();
-                _stream = null;
                 _endpoint = null;
                 _readerCancellation = null;
                 _readerTask = null;
@@ -410,7 +416,7 @@ internal sealed class WindowsClawControllerSource(ClawOemButtonLatch oemButtons)
     private async Task ReadLoopAsync(
         FileStream stream,
         long cycleGeneration,
-        Func<CanonicalControllerSample, ValueTask> publish,
+        Func<CanonicalControllerSample, CancellationToken, ValueTask> publish,
         TaskCompletionSource firstSample,
         CancellationToken cancellationToken)
     {
@@ -445,7 +451,7 @@ internal sealed class WindowsClawControllerSource(ClawOemButtonLatch oemButtons)
                 DateTimeOffset.UtcNow,
                 quality,
                 _oemButtons);
-            await publish(sample).ConfigureAwait(false);
+            await publish(sample, cancellationToken).ConfigureAwait(false);
             firstSample.TrySetResult();
         }
     }
@@ -515,14 +521,9 @@ internal static class HidEndpointEnumerator
     /// <summary>The DirectInput pad the MCU presents after switching to that mode.</summary>
     /// <returns>The endpoint, or null when it cannot be found.</returns>
     /// <remarks>
-    /// Currently always null on the reference Claw, and the reason is <see cref="Enumerate"/> rather
-    /// than this predicate — see the note in <see cref="DiscoverControllerTopology"/>. Windows does
-    /// list the pad (HID\VID_0DB0&amp;PID_1902&amp;MI_00&amp;COL01, "HID-compliant game controller"),
-    /// so this returning null means the enumeration did not surface a collection that exists.
-    /// <para>
-    /// Do not repoint this at the vendor pipe to make it non-null. That was tried and measured: the
-    /// pipe delivered no input over eight seconds of real use and answers only commands.
-    /// </para>
+    /// The exact PID, usage and report length distinguish the physical gamepad collection from the
+    /// MCU vendor command collection. Controller input on the reference unit is supplied through
+    /// this matching path.
     /// </remarks>
     public static HidEndpoint? FindDirectInputGamepad() => Enumerate().FirstOrDefault(endpoint =>
         endpoint.ProductId == ClawHardwareFacts.DirectInputProductId
@@ -548,18 +549,6 @@ internal static class HidEndpointEnumerator
             ClawControllerMode mode = mcu.ProductId == ClawHardwareFacts.XInputProductId
                 ? ClawControllerMode.XInput
                 : ClawControllerMode.DirectInput;
-            // NOTE (device-observed, reference Claw MS-1T52 firmware 0229, 2026-08-29): in
-            // DirectInput mode this finds nothing, and the cause is Enumerate() below rather than
-            // this rule. The DirectInput pad genuinely exists — Windows lists
-            // HID\VID_0DB0&PID_1902&MI_00&COL01 as a HID game controller — but it never comes back
-            // from the HID interface enumeration, which returns only MI_01's keyboard, mouse and
-            // consumer collections plus MI_00&COL02's vendor pipe.
-            //
-            // Two things were ruled out by measurement rather than argument. It is not a
-            // re-enumeration race: the mode switch settles in ~1.6 s and the set is unchanged after
-            // 12 s. And the vendor pipe is not a substitute source: reading it for 8 s while the
-            // device was being used produced no input at all, only a command response, so it is a
-            // command channel and hiding it would hide the wrong device.
             IReadOnlyList<PhysicalDeviceIdentity> physical = endpoints
                 .Where(endpoint =>
                     endpoint.ProductId == mcu.ProductId

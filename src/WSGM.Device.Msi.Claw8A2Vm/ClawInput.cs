@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using WSGM.Device.Sdk.Input;
+using WSGM.Device.Sdk.Plugin;
 
 namespace WSGM.Device.Msi.Claw8A2Vm;
 
@@ -322,14 +323,19 @@ internal sealed class FirmwareChordSuppressor : IFirmwareChordSuppressor
     private Thread? _thread;
     private uint _threadId;
     private nint _hook;
+    private Action<Exception>? _fault;
+    private int _stopping;
 
     public FirmwareChordSuppressor()
     {
         _hookProcedure = HookCallback;
     }
 
-    public async ValueTask<bool> StartAsync(CancellationToken cancellationToken)
+    public async ValueTask<bool> StartAsync(
+        Action<Exception> fault,
+        CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(fault);
         TaskCompletionSource<bool> started;
         lock (_gate)
         {
@@ -339,6 +345,8 @@ internal sealed class FirmwareChordSuppressor : IFirmwareChordSuppressor
             }
 
             started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _fault = fault;
+            Volatile.Write(ref _stopping, 0);
             _thread = new Thread(() => RunHook(started))
             {
                 IsBackground = true,
@@ -347,7 +355,23 @@ internal sealed class FirmwareChordSuppressor : IFirmwareChordSuppressor
             _thread.Start();
         }
 
-        return await started.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await started.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await StopAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                ReportFault(exception);
+            }
+
+            throw;
+        }
     }
 
     public async ValueTask StopAsync(CancellationToken cancellationToken)
@@ -365,6 +389,8 @@ internal sealed class FirmwareChordSuppressor : IFirmwareChordSuppressor
             return;
         }
 
+        Volatile.Write(ref _stopping, 1);
+
         if (threadId != 0)
         {
             _ = NativeKeyboard.PostThreadMessage(threadId, NativeKeyboard.WM_QUIT, 0, 0);
@@ -376,6 +402,14 @@ internal sealed class FirmwareChordSuppressor : IFirmwareChordSuppressor
         if (!joined)
         {
             throw new TimeoutException("The firmware chord hook thread did not stop within one second.");
+        }
+
+        lock (_gate)
+        {
+            if (_thread is null)
+            {
+                _fault = null;
+            }
         }
     }
 
@@ -403,10 +437,27 @@ internal sealed class FirmwareChordSuppressor : IFirmwareChordSuppressor
         started.TrySetResult(true);
         try
         {
-            while (NativeKeyboard.GetMessage(out NativeKeyboard.Message message, 0, 0, 0) > 0)
+            int messageResult = 0;
+            while (Volatile.Read(ref _stopping) == 0
+                && (messageResult = NativeKeyboard.GetMessage(
+                       out NativeKeyboard.Message message,
+                       0,
+                       0,
+                       0)) > 0)
             {
                 _ = NativeKeyboard.TranslateMessage(in message);
                 _ = NativeKeyboard.DispatchMessage(in message);
+            }
+
+            if (Volatile.Read(ref _stopping) == 0 && messageResult < 0)
+            {
+                ReportFault(new InvalidOperationException(
+                    $"The firmware chord hook message loop failed with Win32 {Marshal.GetLastWin32Error()}."));
+            }
+            else if (Volatile.Read(ref _stopping) == 0)
+            {
+                ReportFault(new InvalidOperationException(
+                    "The firmware chord hook thread exited without a stop request."));
             }
         }
         finally
@@ -493,6 +544,22 @@ internal sealed class FirmwareChordSuppressor : IFirmwareChordSuppressor
         {
             _thread = null;
             _threadId = 0;
+            _fault = null;
+        }
+    }
+
+    private void ReportFault(Exception exception)
+    {
+        try
+        {
+            _fault?.Invoke(exception);
+        }
+        catch (Exception callbackException) when (callbackException is not OutOfMemoryException)
+        {
+            PluginTrace.Failure(
+                "keyboard",
+                "Firmware chord hook fault reporting failed",
+                callbackException);
         }
     }
 }
@@ -606,7 +673,7 @@ internal static partial class NativeKeyboard
     [DllImport("user32.dll", SetLastError = true)]
     public static extern uint SendInput(uint count, [In] Input[] inputs, int size);
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern int GetMessage(out Message message, nint window, uint minimum, uint maximum);
 
     [DllImport("user32.dll")]

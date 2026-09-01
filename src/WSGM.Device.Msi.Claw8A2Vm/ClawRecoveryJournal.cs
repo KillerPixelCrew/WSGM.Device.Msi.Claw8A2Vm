@@ -230,13 +230,16 @@ internal sealed class ClawRecoveryJournal : IAsyncDisposable
         string? currentFirmwareIdentity)
     {
         ArgumentNullException.ThrowIfNull(entry);
-        if (entry.Status is ClawRecoveryStatus.RestoreFailed)
+        if (string.Equals(entry.FirmwareIdentity, currentFirmwareIdentity, StringComparison.Ordinal))
         {
-            return ClawReconciliationAction.Block;
+            // One bounded reconciliation attempt is made per fresh device cycle. A transient bus
+            // failure from the previous cycle must not permanently strand exact captured state,
+            // but a firmware identity change still forbids the write.
+            return ClawReconciliationAction.Restore;
         }
 
-        return string.Equals(entry.FirmwareIdentity, currentFirmwareIdentity, StringComparison.Ordinal)
-            ? ClawReconciliationAction.Restore
+        return entry.Status is ClawRecoveryStatus.RestoreFailed
+            ? ClawReconciliationAction.Block
             : ClawReconciliationAction.ReportOnly;
     }
 

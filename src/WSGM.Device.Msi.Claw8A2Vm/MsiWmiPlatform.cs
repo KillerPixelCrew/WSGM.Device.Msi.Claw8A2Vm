@@ -205,15 +205,59 @@ internal sealed class MsiWmiPlatform : IMsiWmiTransport
     }
 }
 
-internal sealed class WindowsClawIdentityReader(IMsiWmiTransport wmi) : IClawIdentityReader
+internal sealed class WindowsClawIdentityReader : IClawIdentityReader
 {
-    private readonly IMsiWmiTransport _wmi = wmi ?? throw new ArgumentNullException(nameof(wmi));
+    private readonly IMsiWmiTransport _wmi;
+    private readonly Func<DeviceIdentitySnapshot> _readBaseIdentity;
+    private readonly Func<IReadOnlyList<UsbEndpointObservation>> _readControllerEndpoints;
+    private readonly Func<bool> _readOnAcPower;
+
+    public WindowsClawIdentityReader(IMsiWmiTransport wmi)
+        : this(wmi, ReadBaseMachineIdentity, ReadControllerEndpoints, ReadOnAcPower)
+    {
+    }
+
+    internal WindowsClawIdentityReader(
+        IMsiWmiTransport wmi,
+        Func<DeviceIdentitySnapshot> readBaseIdentity,
+        Func<IReadOnlyList<UsbEndpointObservation>> readControllerEndpoints,
+        Func<bool> readOnAcPower)
+    {
+        _wmi = wmi ?? throw new ArgumentNullException(nameof(wmi));
+        _readBaseIdentity = readBaseIdentity ?? throw new ArgumentNullException(nameof(readBaseIdentity));
+        _readControllerEndpoints = readControllerEndpoints
+            ?? throw new ArgumentNullException(nameof(readControllerEndpoints));
+        _readOnAcPower = readOnAcPower ?? throw new ArgumentNullException(nameof(readOnAcPower));
+    }
 
     public async ValueTask<ClawIdentityState> ReadAsync(CancellationToken cancellationToken)
     {
-        DeviceIdentitySnapshot snapshot = await Task.Run(ReadMachineIdentity, CancellationToken.None)
+        DeviceIdentitySnapshot snapshot = await Task.Run(_readBaseIdentity, CancellationToken.None)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
+
+        // This is the admission boundary. MSI's WMI provider reaches the embedded controller, and
+        // the controller inventory reaches HID/PnP. Neither is even queried until all three SMBIOS
+        // identity signals name the exact supported board. StartAsync repeats this check, so an
+        // incorrectly constructed start context still fails before a transport is touched.
+        if (!IsExactMachine(snapshot))
+        {
+            return new ClawIdentityState
+            {
+                Snapshot = snapshot,
+                ExactMachineMatch = false,
+                WmiFirmwareVerified = false,
+                McuFirmwareVerified = false,
+                OnAcPower = false,
+            };
+        }
+
+        IReadOnlyList<UsbEndpointObservation> controllerEndpoints = await Task.Run(
+                _readControllerEndpoints,
+                CancellationToken.None)
+            .WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        snapshot = snapshot with { UsbEndpoints = controllerEndpoints };
 
         bool providerAvailable;
         string? ecFirmware = null;
@@ -270,7 +314,6 @@ internal sealed class WindowsClawIdentityReader(IMsiWmiTransport wmi) : IClawIde
                 : [],
         };
 
-        bool exactMachineMatch = IsExactMachine(snapshot);
         bool mcuFirmwareVerified = snapshot.UsbEndpoints.Any(endpoint =>
             string.Equals(endpoint.VendorId, ClawHardwareFacts.UsbVendorId, StringComparison.OrdinalIgnoreCase)
             && IsControllerProduct(endpoint.ProductId)
@@ -279,10 +322,10 @@ internal sealed class WindowsClawIdentityReader(IMsiWmiTransport wmi) : IClawIde
         return new ClawIdentityState
         {
             Snapshot = snapshot,
-            ExactMachineMatch = exactMachineMatch,
-            WmiFirmwareVerified = exactMachineMatch && wmiFirmwareVerified,
-            McuFirmwareVerified = exactMachineMatch && mcuFirmwareVerified,
-            OnAcPower = ReadOnAcPower(),
+            ExactMachineMatch = true,
+            WmiFirmwareVerified = wmiFirmwareVerified,
+            McuFirmwareVerified = mcuFirmwareVerified,
+            OnAcPower = _readOnAcPower(),
         };
     }
 
@@ -291,7 +334,7 @@ internal sealed class WindowsClawIdentityReader(IMsiWmiTransport wmi) : IClawIde
         && string.Equals(identity.BaseboardProduct, ClawHardwareFacts.BoardProduct, StringComparison.OrdinalIgnoreCase)
         && string.Equals(identity.SystemSku, ClawHardwareFacts.SystemSku, StringComparison.OrdinalIgnoreCase);
 
-    private static DeviceIdentitySnapshot ReadMachineIdentity()
+    private static DeviceIdentitySnapshot ReadBaseMachineIdentity()
     {
         using ManagementObject system = QuerySingle(
             "root\\CIMV2",
@@ -312,7 +355,7 @@ internal sealed class WindowsClawIdentityReader(IMsiWmiTransport wmi) : IClawIde
             BaseboardProduct = Normalize(board["Product"]),
             BaseboardVersion = Normalize(board["Version"]),
             BiosVersion = Normalize(bios["SMBIOSBIOSVersion"]),
-            UsbEndpoints = ReadControllerEndpoints(),
+            UsbEndpoints = [],
         };
     }
 

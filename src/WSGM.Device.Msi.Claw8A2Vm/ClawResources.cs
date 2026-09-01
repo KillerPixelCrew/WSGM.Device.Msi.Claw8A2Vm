@@ -9,6 +9,24 @@ using WSGM.Device.Sdk.Plugin;
 
 namespace WSGM.Device.Msi.Claw8A2Vm;
 
+internal static class ClawDiagnosticText
+{
+    public static string FromException(string context, Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        string message = $"{context} ({exception.GetType().Name}): {exception.Message}";
+        int length = Math.Min(message.Length, PluginTrace.MaxMessageLength);
+        char[] bounded = new char[length];
+        for (int index = 0; index < bounded.Length; index++)
+        {
+            char character = message[index];
+            bounded[index] = PlainText.IsUnsafe(character) ? ' ' : character;
+        }
+
+        return new string(bounded);
+    }
+}
+
 internal enum ClawServiceState
 {
     Idle,
@@ -458,7 +476,8 @@ internal sealed class LightingService(
 internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatus(ServiceIds.Motion)
 {
     private readonly IClawMotionSource _source = source ?? throw new ArgumentNullException(nameof(source));
-    private bool _staleReported;
+    private MotionSample? _latest;
+    private int _staleReported;
 
     /// <summary>How long a sensor reading may still be attached to a controller sample.</summary>
     /// <remarks>
@@ -470,14 +489,14 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
     /// </remarks>
     internal static readonly TimeSpan MaximumMotionAge = TimeSpan.FromMilliseconds(250);
 
-    public MotionSample? Latest { get; private set; }
+    public MotionSample? Latest => Volatile.Read(ref _latest);
 
     /// <summary>The last reading, or null once it is too old to still describe the device.</summary>
     /// <param name="now">Current time, from the caller's clock.</param>
     /// <returns>The reading to attach, or null when motion has gone stale.</returns>
     public MotionSample? Current(DateTimeOffset now)
     {
-        if (Latest is not { } sample)
+        if (Volatile.Read(ref _latest) is not { } sample)
         {
             return null;
         }
@@ -495,9 +514,8 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
 
         // Once per stall, never per sample: this is called from the controller reader at about
         // 125 Hz, and a stalled sensor would otherwise fill the log with one line per report.
-        if (!_staleReported)
+        if (Interlocked.Exchange(ref _staleReported, 1) == 0)
         {
-            _staleReported = true;
             PluginTrace.Warn(
                 "motion",
                 $"Gyroscope reading is {(now - stamp).TotalMilliseconds:F0} ms old; motion is "
@@ -514,11 +532,10 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
         bool started = await _source.StartAsync(
             sample =>
             {
-                Latest = sample;
+                Volatile.Write(ref _latest, sample);
                 // A fresh reading ends the stall, and re-arms the one-shot report for the next one.
-                if (_staleReported)
+                if (Interlocked.Exchange(ref _staleReported, 0) != 0)
                 {
-                    _staleReported = false;
                     PluginTrace.Info("motion", "Gyroscope readings resumed.");
                 }
 
@@ -537,7 +554,7 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
         CancellationToken cancellationToken)
     {
         await _source.StopAsync(cancellationToken).ConfigureAwait(false);
-        Latest = null;
+        Volatile.Write(ref _latest, null);
         return Set(ClawServiceState.Idle);
     }
 
@@ -550,7 +567,7 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
         CancellationToken cancellationToken)
     {
         await _source.StopAsync(cancellationToken).ConfigureAwait(false);
-        Latest = null;
+        Volatile.Write(ref _latest, null);
         return Set(ClawServiceState.Idle);
     }
 }
@@ -722,21 +739,22 @@ internal sealed class ControllerService(
                 PublishControllerSampleAsync,
                 ReportControllerReaderFault,
                 cancellationToken).ConfigureAwait(false);
+
+            await _host.PublishPhysicalDevicesAsync(
+                _current.PhysicalDevices,
+                OutputCapabilities,
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             _host.Trace(
                 DeviceTraceLevel.Error,
                 "controller",
-                $"reader failed to start on the DirectInput pad: {ex.GetType().Name}: {ex.Message}");
+                $"controller acquisition failed before physical-device handoff completed: "
+                    + $"{ex.GetType().Name}: {ex.Message}");
             await RestoreAfterFailedAcquireAsync(context.Deadline).ConfigureAwait(false);
             throw;
         }
-
-        await _host.PublishPhysicalDevicesAsync(
-            _current.PhysicalDevices,
-            OutputCapabilities,
-            cancellationToken).ConfigureAwait(false);
         _host.Trace(
             DeviceTraceLevel.Info,
             "controller",
@@ -747,11 +765,14 @@ internal sealed class ControllerService(
 
     private void ReportControllerReaderFault(Exception exception)
     {
+        string detail = ClawDiagnosticText.FromException(
+            "The controller reader stopped",
+            exception);
         CapabilityReason reason = new(
             CapabilityReasonCode.TransportFaulted,
-            $"The controller reader stopped ({exception.GetType().Name}): {exception.Message}");
+            detail);
         Fault(reason);
-        _host.ReportFault("controller", reason.Detail ?? "The controller reader stopped.");
+        _host.ReportFault("controller", detail);
     }
 
     public async ValueTask<ClawServiceResult> SuspendAsync(
@@ -1006,7 +1027,9 @@ internal sealed class ControllerService(
         return failure;
     }
 
-    private async ValueTask PublishControllerSampleAsync(CanonicalControllerSample sample)
+    private async ValueTask PublishControllerSampleAsync(
+        CanonicalControllerSample sample,
+        CancellationToken cancellationToken)
     {
         CanonicalButtons current = sample.Buttons
             & (CanonicalButtons.RearPaddle1 | CanonicalButtons.RearPaddle2);
@@ -1016,7 +1039,8 @@ internal sealed class ControllerService(
             await PublishRearEventAsync(
                 "oem3",
                 (current & CanonicalButtons.RearPaddle1) != 0,
-                sample).ConfigureAwait(false);
+                sample,
+                cancellationToken).ConfigureAwait(false);
         }
 
         if ((changed & CanonicalButtons.RearPaddle2) != 0)
@@ -1024,7 +1048,8 @@ internal sealed class ControllerService(
             await PublishRearEventAsync(
                 "oem4",
                 (current & CanonicalButtons.RearPaddle2) != 0,
-                sample).ConfigureAwait(false);
+                sample,
+                cancellationToken).ConfigureAwait(false);
         }
 
         _rearButtons = current;
@@ -1033,13 +1058,14 @@ internal sealed class ControllerService(
         // sample and replay a non-zero angular velocity through the virtual Deck indefinitely.
         await _host.PublishControllerSampleAsync(
             sample with { Motion = _motion.Current(sample.Timestamp) },
-            CancellationToken.None).ConfigureAwait(false);
+            cancellationToken).ConfigureAwait(false);
     }
 
     private ValueTask PublishRearEventAsync(
         string controlId,
         bool pressed,
-        CanonicalControllerSample sample) =>
+        CanonicalControllerSample sample,
+        CancellationToken cancellationToken) =>
         _host.PublishOemEventAsync(
             new OemControlEvent(
                 controlId,
@@ -1048,7 +1074,7 @@ internal sealed class ControllerService(
                 sample.Timestamp,
                 $"claw-hid-{controlId}-{sample.Sequence}",
                 pressed ? OemControlEdge.Pressed : OemControlEdge.Released),
-            CancellationToken.None);
+            cancellationToken);
 
     private async ValueTask RestoreAfterFailedAcquireAsync(DateTimeOffset deadline)
     {
@@ -1091,12 +1117,14 @@ internal sealed class ControllerService(
 
 internal sealed class ChordSuppressorService(
     IFirmwareChordSuppressor suppressor,
-    OemEventService oemEvents) : ClawServiceStatus(ServiceIds.ChordSuppressor)
+    OemEventService oemEvents,
+    IPluginHostAdapter host) : ClawServiceStatus(ServiceIds.ChordSuppressor)
 {
     private readonly IFirmwareChordSuppressor _suppressor = suppressor
         ?? throw new ArgumentNullException(nameof(suppressor));
     private readonly OemEventService _oemEvents = oemEvents
         ?? throw new ArgumentNullException(nameof(oemEvents));
+    private readonly IPluginHostAdapter _host = host ?? throw new ArgumentNullException(nameof(host));
 
     public async ValueTask<ClawServiceResult> AcquireAsync(
         ClawCycleContext context,
@@ -1109,12 +1137,24 @@ internal sealed class ChordSuppressorService(
                 "Chord suppression starts only when the device-identified MSI OEM event source is healthy."));
         }
 
-        bool started = await _suppressor.StartAsync(cancellationToken).ConfigureAwait(false);
+        bool started = await _suppressor.StartAsync(ReportFault, cancellationToken).ConfigureAwait(false);
         return started
             ? Set(ClawServiceState.Owned)
             : Set(ClawServiceState.Degraded, new CapabilityReason(
                 CapabilityReasonCode.TransportFaulted,
                 "The bounded low-level keyboard hook could not be installed."));
+    }
+
+    private void ReportFault(Exception exception)
+    {
+        string detail = ClawDiagnosticText.FromException(
+            "The firmware chord suppressor stopped",
+            exception);
+        CapabilityReason reason = new(
+            CapabilityReasonCode.TransportFaulted,
+            detail);
+        Fault(reason);
+        _host.ReportFault(ServiceId, detail);
     }
 
     public async ValueTask<ClawServiceResult> SuspendAsync(

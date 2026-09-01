@@ -145,7 +145,7 @@ internal interface IClawControllerSource : IAsyncDisposable
 
     ValueTask StartAsync(
         long cycleGeneration,
-        Func<CanonicalControllerSample, ValueTask> publish,
+        Func<CanonicalControllerSample, CancellationToken, ValueTask> publish,
         Action<Exception> fault,
         CancellationToken cancellationToken);
 
@@ -165,7 +165,7 @@ internal interface IClawMotionSource : IAsyncDisposable
 
 internal interface IFirmwareChordSuppressor : IAsyncDisposable
 {
-    ValueTask<bool> StartAsync(CancellationToken cancellationToken);
+    ValueTask<bool> StartAsync(Action<Exception> fault, CancellationToken cancellationToken);
 
     ValueTask StopAsync(CancellationToken cancellationToken);
 }

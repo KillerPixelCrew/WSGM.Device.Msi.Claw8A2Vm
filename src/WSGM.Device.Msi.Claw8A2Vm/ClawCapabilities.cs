@@ -624,6 +624,7 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
     private static readonly TimeSpan MinimumPersistentWriteInterval = TimeSpan.FromSeconds(1);
     private readonly IClawMcuTransport _transport = transport ?? throw new ArgumentNullException(nameof(transport));
     private LightingState? _observed;
+    private byte[]? _observedProfile;
     private DateTimeOffset _lastPersistentWrite;
 
     public async ValueTask<LightingState> ReadAsync(CancellationToken cancellationToken)
@@ -637,6 +638,7 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
             throw new InvalidOperationException("The committed A2VM lighting profile has an unrecognized shape.");
         }
 
+        _observedProfile = [.. profile];
         _observed = new LightingState(
             profile[4],
             ReadColor(profile, 5),
@@ -688,18 +690,31 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
             };
         }
 
-        if (DateTimeOffset.UtcNow - _lastPersistentWrite < MinimumPersistentWriteInterval)
+        TimeSpan untilNextWrite = MinimumPersistentWriteInterval
+            - (DateTimeOffset.UtcNow - _lastPersistentWrite);
+        if (untilNextWrite > TimeSpan.Zero)
         {
-            return new CapabilityCommandResult
+            if (DateTimeOffset.UtcNow + untilNextWrite >= command.Deadline)
             {
-                CommandId = command.CommandId,
-                Outcome = CommandOutcome.Rejected,
-                Reason = new CapabilityReason(
-                    CapabilityReasonCode.ResourceConflict,
-                    "Persistent lighting commits are limited to one per second.",
-                    Retryable: true),
-                CompletedAt = DateTimeOffset.UtcNow,
-            };
+                return new CapabilityCommandResult
+                {
+                    CommandId = command.CommandId,
+                    Outcome = CommandOutcome.Rejected,
+                    Reason = new CapabilityReason(
+                        CapabilityReasonCode.Quiescing,
+                        "The lighting command deadline is too short for the persistent-write interval.",
+                        Retryable: true),
+                    CompletedAt = DateTimeOffset.UtcNow,
+                };
+            }
+
+            await Task.Delay(untilNextWrite, cancellationToken).ConfigureAwait(false);
+            before = await ReadAsync(cancellationToken).ConfigureAwait(false);
+            wanted = update(before);
+            if (wanted == before)
+            {
+                return VerifiedValue(command, before);
+            }
         }
 
         if (!ClawWriteBudget.IsAvailable(command.Deadline))
@@ -719,8 +734,10 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
         // profile survives a reboot, so a write that lands only partly — or lands normalized into
         // something the user did not choose — would otherwise stay on the hardware permanently
         // while the UI reported the command as failed.
-        byte[] restore = Encode(before);
-        byte[] payload = Encode(wanted);
+        byte[] restore = _observedProfile is { Length: 32 }
+            ? [.. _observedProfile]
+            : throw new InvalidOperationException("The lighting profile snapshot was lost.");
+        byte[] payload = Encode(wanted, restore);
         _lastPersistentWrite = DateTimeOffset.UtcNow;
         LightingState readback;
         try
@@ -768,9 +785,9 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
             };
         }
 
-        if (readback != wanted)
+        if (readback != wanted || _observedProfile is null || !_observedProfile.SequenceEqual(payload))
         {
-            RollbackResult rollback = await RollbackAsync(before, restore, cancellationToken)
+            RollbackResult rollback = await RollbackAsync(before, restore, CancellationToken.None)
                 .ConfigureAwait(false);
             return new CapabilityCommandResult
             {
@@ -826,7 +843,9 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
                 cancellationToken).ConfigureAwait(false);
             _lastPersistentWrite = DateTimeOffset.UtcNow;
             LightingState restored = await ReadAsync(cancellationToken).ConfigureAwait(false);
-            if (restored == before)
+            if (restored == before
+                && _observedProfile is not null
+                && _observedProfile.SequenceEqual(restore))
             {
                 PluginTrace.Info("lighting", "Unverified lighting write was rolled back.");
                 return RollbackResult.RestoredVerified;
@@ -838,7 +857,7 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
                 + "profile that persists across reboot.");
             return RollbackResult.RestoreFailed;
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             PluginTrace.Failure("lighting", "Lighting rollback failed", exception);
             return RollbackResult.RestoreFailed;
@@ -852,6 +871,17 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
         payload[1] = 1;
         payload[2] = 0x09;
         payload[3] = 0x03;
+        return Encode(state, payload);
+    }
+
+    private static byte[] Encode(LightingState state, byte[] template)
+    {
+        if (template.Length != 32)
+        {
+            throw new ArgumentException("A Claw lighting profile must contain exactly 32 bytes.", nameof(template));
+        }
+
+        byte[] payload = [.. template];
         payload[4] = checked((byte)state.Brightness);
         for (int zone = 0; zone < 4; zone++)
         {
@@ -861,6 +891,28 @@ internal sealed class ClawA2VmLightingCapability(IClawMcuTransport transport)
 
         WriteColor(payload, 29, state.ButtonsColor);
         return payload;
+    }
+
+    private static CapabilityCommandResult VerifiedValue(
+        CapabilityCommand command,
+        LightingState state)
+    {
+        CapabilityValue currentValue = command.CapabilityId == CapabilityIds.LightingBrightness
+            ? Integer(state.Brightness)
+            : Color(command.InstanceId switch
+            {
+                CapabilityInstances.RightRing => state.RightRingColor,
+                CapabilityInstances.LeftRing => state.LeftRingColor,
+                CapabilityInstances.Buttons => state.ButtonsColor,
+                _ => throw new InvalidOperationException("Unknown lighting zone."),
+            });
+        return new CapabilityCommandResult
+        {
+            CommandId = command.CommandId,
+            Outcome = CommandOutcome.AppliedVerified,
+            ReadbackValue = currentValue,
+            CompletedAt = DateTimeOffset.UtcNow,
+        };
     }
 
     private static int ReadColor(byte[] payload, int offset) =>

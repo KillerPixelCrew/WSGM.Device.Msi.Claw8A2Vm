@@ -16,10 +16,13 @@
 #>
 [CmdletBinding()]
 param(
+    [ValidateNotNullOrEmpty()]
     [string]$OutputRoot = "publish",
 
+    [ValidateNotNullOrEmpty()]
     [string]$Configuration = "Release",
 
+    [ValidateNotNullOrEmpty()]
     [string]$RuntimeIdentifier = "win-x64"
 )
 
@@ -29,6 +32,9 @@ $root = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $root "src\WSGM.Device.Msi.Claw8A2Vm"
 $project = Join-Path $source "WSGM.Device.Msi.Claw8A2Vm.csproj"
 $outputFull = [IO.Path]::GetFullPath((Join-Path $root $OutputRoot))
+$workRoot = Join-Path $outputFull (".wsgm-pack-{0}" -f [Guid]::NewGuid().ToString("N"))
+$workMarker = Join-Path $workRoot ".wsgm-generated-output"
+$workMarkerValue = "claw-package-work-v1"
 
 if (-not (Test-Path -LiteralPath (Join-Path $root "external\WSGM.Device.Sdk\src") -PathType Container)) {
     throw "external\WSGM.Device.Sdk is empty. Clone with --recursive, or run: git submodule update --init"
@@ -45,10 +51,26 @@ if ($packageId -notmatch '^[A-Za-z0-9._-]+$' -or $packageVersion -notmatch '^[0-
     throw "$manifestPath has an unsafe package id or version."
 }
 
-if (Test-Path -LiteralPath $outputFull) {
-    Remove-Item -LiteralPath $outputFull -Recurse -Force
+$archiveName = "$packageId-$packageVersion.wsgmpkg"
+$archive = Join-Path $outputFull $archiveName
+$archiveMarker = "$archive.wsgm-generated-output"
+$archiveMarkerValue = "claw-package-output-v1|$packageId|$packageVersion"
+if (Test-Path -LiteralPath $archiveMarker) {
+    if (-not (Test-Path -LiteralPath $archiveMarker -PathType Leaf) -or
+        (Get-Content -LiteralPath $archiveMarker -Raw).Trim() -cne $archiveMarkerValue) {
+        throw "Refusing to replace an unrecognized package output marker: $archiveMarker"
+    }
 }
-$packageDirectory = Join-Path $outputFull $packageId
+if ((Test-Path -LiteralPath $archive) -and
+    -not (Test-Path -LiteralPath $archiveMarker -PathType Leaf)) {
+    throw "Refusing to overwrite an unmarked package archive: $archive"
+}
+
+New-Item -ItemType Directory -Path $outputFull -Force | Out-Null
+try {
+New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
+Set-Content -LiteralPath $workMarker -Value $workMarkerValue -NoNewline
+$packageDirectory = Join-Path $workRoot $packageId
 New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
 
 & dotnet publish $project `
@@ -110,12 +132,29 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "Validated $packageId $packageVersion"
 
-$archive = Join-Path $outputFull "$packageId-$packageVersion.wsgmpkg"
-& $validator pack $packageDirectory --out $archive
+$stagedArchive = Join-Path $workRoot $archiveName
+& $validator pack $packageDirectory --out $stagedArchive
 if ($LASTEXITCODE -ne 0) {
     throw "Packing the plugin package failed."
 }
 
-$hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+$hash = (Get-FileHash -LiteralPath $stagedArchive -Algorithm SHA256).Hash
+if (Test-Path -LiteralPath $archive) {
+    Remove-Item -LiteralPath $archive -Force
+}
+Move-Item -LiteralPath $stagedArchive -Destination $archive
+Set-Content -LiteralPath $archiveMarker -Value $archiveMarkerValue -NoNewline
 Write-Host "Packed $archive"
 Write-Host "SHA-256 $hash"
+}
+finally {
+    if (Test-Path -LiteralPath $workRoot) {
+        if (-not (Test-Path -LiteralPath $workMarker -PathType Leaf) -or
+            (Get-Content -LiteralPath $workMarker -Raw).Trim() -cne $workMarkerValue) {
+            Write-Warning "Refusing to delete an unmarked package work directory: $workRoot"
+        }
+        else {
+            Remove-Item -LiteralPath $workRoot -Recurse -Force
+        }
+    }
+}

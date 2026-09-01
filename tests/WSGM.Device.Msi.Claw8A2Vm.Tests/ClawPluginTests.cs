@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using WSGM.Device.Msi.Claw8A2Vm;
 using WSGM.Device.Sdk.Capabilities;
 using WSGM.Device.Sdk.Identity;
@@ -64,6 +66,37 @@ public sealed class ClawPluginTests
         Assert.False(result.Matched);
         Assert.Null(result.DeviceDefinitionId);
         Assert.Equal(CapabilityReasonCode.Unsupported, result.Reason?.Code);
+    }
+
+    [Fact]
+    public async Task WindowsIdentityReader_NonClawStopsBeforeEveryEcAndControllerProbe()
+    {
+        FakeWmiTransport wmi = new();
+        bool controllerInventoryCalled = false;
+        bool acPowerCalled = false;
+        WindowsClawIdentityReader reader = new(
+            wmi,
+            () => ExactIdentity() with { BaseboardProduct = "not-a-claw" },
+            () =>
+            {
+                controllerInventoryCalled = true;
+                throw new InvalidOperationException("The controller inventory must remain unreachable.");
+            },
+            () =>
+            {
+                acPowerCalled = true;
+                throw new InvalidOperationException("The AC-power query must remain unreachable.");
+            });
+
+        ClawIdentityState result = await reader.ReadAsync(CancellationToken.None);
+
+        Assert.False(result.ExactMachineMatch);
+        Assert.False(result.WmiFirmwareVerified);
+        Assert.False(result.McuFirmwareVerified);
+        Assert.False(result.OnAcPower);
+        Assert.Equal(0, wmi.ProviderAvailabilityChecks);
+        Assert.False(controllerInventoryCalled);
+        Assert.False(acPowerCalled);
     }
 
     [Fact]
@@ -187,6 +220,76 @@ public sealed class ClawPluginTests
         Assert.Equal(50, restored.Brightness);
     }
 
+    [Fact]
+    public async Task ApplyLighting_PreservesUnknownProfileBytesAndVerifiesTheWholeReadback()
+    {
+        byte[] original = ClawA2VmLightingCapability.Encode(
+            new LightingState(50, 0x112233, 0x445566, 0x778899));
+        original[0] = 0xA5;
+        original[3] = 0x7E;
+        FakeMcuTransport mcu = new() { Profile = original };
+        ClawA2VmLightingCapability lighting = new(mcu);
+        CapabilityCommand command = Command(
+            CapabilityIds.LightingBrightness,
+            instanceId: null,
+            new CapabilityValue
+            {
+                Kind = CapabilityValueKind.Integer,
+                IntegerValue = 75,
+            });
+
+        CapabilityCommandResult result = await lighting.ApplyAsync(
+            command,
+            current => current with { Brightness = 75 },
+            CancellationToken.None);
+
+        byte[] expected = [.. original];
+        expected[4] = 75;
+        Assert.Equal(CommandOutcome.AppliedVerified, result.Outcome);
+        Assert.Equal(expected, Assert.Single(mcu.ProfileWrites));
+        Assert.Equal(expected, mcu.Profile);
+    }
+
+    [Fact]
+    public async Task ApplyLighting_UnknownByteReadbackMismatch_RestoresExactRawProfile()
+    {
+        byte[] original = ClawA2VmLightingCapability.Encode(
+            new LightingState(50, 0x112233, 0x445566, 0x778899));
+        original[0] = 0xA5;
+        original[3] = 0x7E;
+        FakeMcuTransport mcu = new()
+        {
+            Profile = original,
+            TransformNextWrite = payload =>
+            {
+                payload[0] ^= 0xFF;
+                return payload;
+            },
+        };
+        ClawA2VmLightingCapability lighting = new(mcu);
+        CapabilityCommand command = Command(
+            CapabilityIds.LightingBrightness,
+            instanceId: null,
+            new CapabilityValue
+            {
+                Kind = CapabilityValueKind.Integer,
+                IntegerValue = 75,
+            });
+
+        CapabilityCommandResult result = await lighting.ApplyAsync(
+            command,
+            current => current with { Brightness = 75 },
+            CancellationToken.None);
+
+        Assert.Equal(CommandOutcome.Indeterminate, result.Outcome);
+        Assert.Equal(RollbackResult.RestoredVerified, result.Rollback);
+        Assert.Equal(2, mcu.ProfileWrites.Count);
+        Assert.Equal(0xA5, mcu.ProfileWrites[0][0]);
+        Assert.Equal(0x7E, mcu.ProfileWrites[0][3]);
+        Assert.Equal(original, mcu.ProfileWrites[1]);
+        Assert.Equal(original, mcu.Profile);
+    }
+
     [Theory]
     [InlineData(60)]
     [InlineData(80)]
@@ -235,6 +338,19 @@ public sealed class ClawPluginTests
         _ = modified.Observe(NativeKeyboard.VK_CONTROL, keyDown: true, injected: false);
         _ = modified.Observe(NativeKeyboard.VK_LWIN, keyDown: true, injected: false);
         Assert.False(modified.Observe(NativeKeyboard.VK_G, keyDown: false, injected: false).Suppress);
+    }
+
+    [Fact]
+    public void NativeKeyboard_GetMessageUsesSignedResultAndPreservesTheWin32Error()
+    {
+        MethodInfo method = Assert.IsAssignableFrom<MethodInfo>(typeof(NativeKeyboard).GetMethod(
+            nameof(NativeKeyboard.GetMessage),
+            BindingFlags.Public | BindingFlags.Static));
+        DllImportAttribute import = Assert.IsType<DllImportAttribute>(
+            method.GetCustomAttribute<DllImportAttribute>());
+
+        Assert.Equal(typeof(int), method.ReturnType);
+        Assert.True(import.SetLastError);
     }
 
     [Fact]
@@ -321,6 +437,103 @@ public sealed class ClawPluginTests
         Assert.Equal("oem2", controlEvent.ControlId);
         Assert.Equal(OemPressKind.Long, controlEvent.Press);
         Assert.Equal(CycleGeneration, controlEvent.SourceGeneration);
+    }
+
+    [Fact]
+    public async Task StartAsync_PublicationFailure_RetractsEveryAcceptedSurface()
+    {
+        using TemporaryDirectory state = new();
+        await using Claw8A2VmPlugin plugin = new(CreateServices());
+        ControllablePluginHostAdapter host = new(CycleGeneration)
+        {
+            FailNextNonEmptyOemPublication = true,
+        };
+
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await plugin.StartAsync(StartContext(host, state.Root), CancellationToken.None));
+
+        Assert.Equal(2, host.DescriptorSets.Count);
+        Assert.NotEmpty(host.DescriptorSets[0].Descriptors);
+        Assert.Empty(host.DescriptorSets[1].Descriptors);
+        Assert.True(host.DescriptorSets[1].Generation > host.DescriptorSets[0].Generation);
+        Assert.Equal(2, host.OemControlSets.Count);
+        Assert.NotEmpty(host.OemControlSets[0]);
+        Assert.Empty(host.OemControlSets[1]);
+        Assert.Empty(Assert.Single(host.PhysicalDeviceSets));
+
+        PluginDiagnostics diagnostics = await plugin.GetDiagnosticsAsync(CancellationToken.None);
+        Assert.Equal("stopped", diagnostics.Values["cycle"]);
+        Assert.Equal("unavailable", diagnostics.Values["recovery"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ControllerStop_CancelsAndUnblocksAnInFlightHostPublication(bool rearOemEvent)
+    {
+        using TemporaryDirectory state = new();
+        FakeControllerSource source = new() { Topology = DirectInputTopology() };
+        ControllablePluginHostAdapter host = new(CycleGeneration)
+        {
+            BlockControllerSamples = !rearOemEvent,
+            BlockOemEvents = rearOemEvent,
+        };
+        await using ClawRecoveryJournal journal = await ClawRecoveryJournal.OpenAsync(
+            state.Root,
+            CancellationToken.None);
+        ControllerService controller = new(
+            new FakeIdentityReader(),
+            new FakeMcuTransport(),
+            source,
+            new MotionService(new FakeMotionSource()),
+            host,
+            journal)
+        {
+            Enabled = true,
+        };
+        _ = await controller.AcquireAsync(
+            new ClawCycleContext(CycleGeneration, DateTimeOffset.UtcNow.AddSeconds(10)),
+            CancellationToken.None);
+        Task publication = source.EmitAsync(new CanonicalControllerSample
+        {
+            Sequence = 1,
+            CycleGeneration = CycleGeneration,
+            Timestamp = DateTimeOffset.UtcNow,
+            Buttons = rearOemEvent ? CanonicalButtons.RearPaddle1 : CanonicalButtons.None,
+        }).AsTask();
+        Task blockedPublication = rearOemEvent ? host.OemEventEntered : host.ControllerSampleEntered;
+        await blockedPublication.WaitAsync(TimeSpan.FromSeconds(2));
+
+        ControllerHandoffResult result = await controller.ReleaseControllerAsync(
+            DateTimeOffset.UtcNow.AddSeconds(10),
+            CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(ControllerHandoffResult.ReleasedVerified, result);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await publication);
+    }
+
+    [Fact]
+    public async Task ChordSuppressor_BackgroundFaultPropagatesAsBoundedServiceFailure()
+    {
+        FakeOemEventSource oemSource = new();
+        ControllablePluginHostAdapter host = new(CycleGeneration);
+        OemEventService oem = new(oemSource, host, new ClawOemButtonLatch());
+        _ = await oem.AcquireAsync(
+            new ClawCycleContext(CycleGeneration, DateTimeOffset.UtcNow.AddSeconds(10)),
+            CancellationToken.None);
+        FakeChordSuppressor hook = new();
+        ChordSuppressorService suppressor = new(hook, oem, host);
+        _ = await suppressor.AcquireAsync(
+            new ClawCycleContext(CycleGeneration, DateTimeOffset.UtcNow.AddSeconds(10)),
+            CancellationToken.None);
+
+        hook.TriggerFault(new IOException(new string('x', 1500) + "\nsecond line"));
+
+        Assert.Equal(ClawServiceState.Faulted, suppressor.State);
+        (string scope, string message) = Assert.Single(host.Faults);
+        Assert.Equal(ServiceIds.ChordSuppressor, scope);
+        Assert.True(message.Length <= PluginTrace.MaxMessageLength);
+        Assert.DoesNotContain('\n', message);
     }
 
     [Fact]
@@ -578,6 +791,64 @@ public sealed class ClawPluginTests
         Assert.Empty(reconciled.OutstandingEntries);
     }
 
+    [Fact]
+    public async Task StartAsync_RestoreFailureIsRetriedAndRecoveredInTheNextCycle()
+    {
+        using TemporaryDirectory state = new();
+        await using (ClawRecoveryJournal journal = await ClawRecoveryJournal.OpenAsync(
+            state.Root,
+            CancellationToken.None))
+        {
+            _ = await journal.BeginAsync(
+                ServiceIds.Power,
+                CapabilityIds.PowerSustained,
+                ClawFirmwareIdentities.Wmi,
+                ClawRecoveryValues.Power(new PowerPair(30, 37, 0xC1)),
+                CancellationToken.None);
+        }
+
+        FakeWmiTransport wmi = new() { FailNextSetter = true };
+        wmi.SetData(ClawHardwareFacts.PowerSustainedAddress, 25);
+        await using (Claw8A2VmPlugin firstCycle = new(CreateServices(wmi)))
+        {
+            TestPluginHostAdapter firstHost = new(CycleGeneration);
+            _ = await firstCycle.StartAsync(
+                StartContext(firstHost, state.Root),
+                CancellationToken.None);
+            PluginDiagnostics diagnostics = await firstCycle.GetDiagnosticsAsync(CancellationToken.None);
+
+            Assert.Equal("pending", diagnostics.Values["recovery"]);
+            Assert.Equal(ClawServiceState.Faulted.ToString(), diagnostics.Values[ServiceIds.Power]);
+            _ = await firstCycle.StopAsync(
+                new PluginStopContext(
+                    PluginStopReason.IntegrationDisabled,
+                    DateTimeOffset.UtcNow.AddSeconds(10)),
+                CancellationToken.None);
+        }
+
+        await using (Claw8A2VmPlugin secondCycle = new(CreateServices(wmi)))
+        {
+            TestPluginHostAdapter secondHost = new(CycleGeneration + 1);
+            _ = await secondCycle.StartAsync(
+                StartContext(secondHost, state.Root),
+                CancellationToken.None);
+            PluginDiagnostics diagnostics = await secondCycle.GetDiagnosticsAsync(CancellationToken.None);
+
+            Assert.Equal(30, wmi.ReadData(ClawHardwareFacts.PowerSustainedAddress));
+            Assert.Equal("healthy", diagnostics.Values["recovery"]);
+            await using ClawRecoveryJournal reconciled = await ClawRecoveryJournal.OpenAsync(
+                state.Root,
+                CancellationToken.None);
+            Assert.Empty(reconciled.OutstandingEntries);
+
+            _ = await secondCycle.StopAsync(
+                new PluginStopContext(
+                    PluginStopReason.IntegrationDisabled,
+                    DateTimeOffset.UtcNow.AddSeconds(10)),
+                CancellationToken.None);
+        }
+    }
+
     private static CapabilityCommand Command(
         string capabilityId,
         string? instanceId,
@@ -592,10 +863,10 @@ public sealed class ClawPluginTests
             Deadline = DateTimeOffset.UtcNow.AddMinutes(1),
         };
 
-    private static PluginStartContext StartContext(TestPluginHostAdapter host, string stateDirectory) => new()
+    private static PluginStartContext StartContext(IPluginHostAdapter host, string stateDirectory) => new()
     {
         Host = host,
-        CycleGeneration = CycleGeneration,
+        CycleGeneration = host.CycleGeneration,
         DeviceDefinitionId = ClawHardwareFacts.DeviceDefinitionId,
         StateDirectory = stateDirectory,
         ControllerManagementEnabled = false,
@@ -603,14 +874,18 @@ public sealed class ClawPluginTests
 
     private static ClawHardwareServices CreateServices(
         FakeWmiTransport? wmi = null,
-        FakeOemEventSource? oemEvents = null) => new(
+        FakeOemEventSource? oemEvents = null,
+        FakeMcuTransport? mcu = null,
+        FakeControllerSource? controller = null,
+        FakeMotionSource? motion = null,
+        FakeChordSuppressor? chordSuppressor = null) => new(
             new FakeIdentityReader(),
             wmi ?? new FakeWmiTransport(),
             oemEvents ?? new FakeOemEventSource(),
-            new FakeMcuTransport(),
-            new FakeControllerSource(),
-            new FakeMotionSource(),
-            new FakeChordSuppressor(),
+            mcu ?? new FakeMcuTransport(),
+            controller ?? new FakeControllerSource(),
+            motion ?? new FakeMotionSource(),
+            chordSuppressor ?? new FakeChordSuppressor(),
             new ClawOemButtonLatch());
 
     private static DeviceIdentitySnapshot ExactIdentity() => new()
@@ -698,6 +973,10 @@ internal sealed class FakeWmiTransport : IMsiWmiTransport
 
     public List<(string Method, byte[] Package)> Writes { get; } = [];
 
+    public bool FailNextSetter { get; set; }
+
+    public int ProviderAvailabilityChecks { get; private set; }
+
     public int ReadData(byte address) =>
         BinaryPrimitives.ReadInt32LittleEndian(_responses[("Get_Data", address)].AsSpan(1, sizeof(int)));
 
@@ -709,6 +988,7 @@ internal sealed class FakeWmiTransport : IMsiWmiTransport
     public ValueTask<bool> IsProviderAvailableAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        ProviderAvailabilityChecks++;
         return ValueTask.FromResult(true);
     }
 
@@ -727,6 +1007,12 @@ internal sealed class FakeWmiTransport : IMsiWmiTransport
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (FailNextSetter)
+        {
+            FailNextSetter = false;
+            throw new IOException("Synthetic WMI setter failure.");
+        }
+
         Writes.Add((methodName, [.. package]));
         byte selector = package[0];
         if (methodName == "Set_Data")
@@ -797,6 +1083,16 @@ internal sealed class FakeMcuTransport : IClawMcuTransport
 
     public Action? AfterNextWrite { get; set; }
 
+    public Func<byte[], byte[]>? TransformNextWrite { get; set; }
+
+    public List<byte[]> ProfileWrites { get; } = [];
+
+    public byte[] Profile
+    {
+        get => [.. _profile];
+        set => _profile = [.. value];
+    }
+
     public ValueTask<bool> IsAvailableAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -818,7 +1114,11 @@ internal sealed class FakeMcuTransport : IClawMcuTransport
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        _profile = payload.ToArray();
+        byte[] write = payload.ToArray();
+        ProfileWrites.Add([.. write]);
+        Func<byte[], byte[]>? transform = TransformNextWrite;
+        TransformNextWrite = null;
+        _profile = transform is null ? write : transform([.. write]);
         Action? afterWrite = AfterNextWrite;
         AfterNextWrite = null;
         afterWrite?.Invoke();
@@ -847,6 +1147,12 @@ internal sealed class FakeMcuTransport : IClawMcuTransport
 
 internal sealed class FakeControllerSource : IClawControllerSource
 {
+    private readonly object _gate = new();
+    private Func<CanonicalControllerSample, CancellationToken, ValueTask>? _publish;
+    private Action<Exception>? _fault;
+    private CancellationTokenSource? _readerCancellation;
+    private Task? _activePublication;
+
     public ControllerTopology Topology { get; set; } = new(
         ClawControllerMode.XInput,
         ClawHardwareFacts.XInputProductId,
@@ -867,24 +1173,83 @@ internal sealed class FakeControllerSource : IClawControllerSource
 
     public ValueTask StartAsync(
         long cycleGeneration,
-        Func<CanonicalControllerSample, ValueTask> publish,
+        Func<CanonicalControllerSample, CancellationToken, ValueTask> publish,
         Action<Exception> fault,
         CancellationToken cancellationToken)
     {
-        _ = fault;
         cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            _readerCancellation?.Dispose();
+            _readerCancellation = new CancellationTokenSource();
+            _publish = publish;
+            _fault = fault;
+        }
+
         return ValueTask.CompletedTask;
     }
 
-    public ValueTask StopAsync(CancellationToken cancellationToken)
+    public async ValueTask StopAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        CancellationTokenSource? readerCancellation;
+        Task? activePublication;
+        lock (_gate)
+        {
+            readerCancellation = _readerCancellation;
+            activePublication = _activePublication;
+            readerCancellation?.Cancel();
+        }
+
+        if (activePublication is not null)
+        {
+            try
+            {
+                await activePublication.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (readerCancellation?.IsCancellationRequested == true)
+            {
+            }
+        }
+
+        lock (_gate)
+        {
+            _publish = null;
+            _fault = null;
+            _activePublication = null;
+            _readerCancellation?.Dispose();
+            _readerCancellation = null;
+        }
+
         if (FailStop)
         {
             throw new IOException("Synthetic controller source stop failure.");
         }
+    }
 
-        return ValueTask.CompletedTask;
+    public ValueTask EmitAsync(CanonicalControllerSample sample)
+    {
+        Func<CanonicalControllerSample, CancellationToken, ValueTask> publish;
+        CancellationToken cancellationToken;
+        lock (_gate)
+        {
+            publish = _publish ?? throw new InvalidOperationException("The fake reader is not active.");
+            cancellationToken = _readerCancellation?.Token
+                ?? throw new InvalidOperationException("The fake reader has no cancellation source.");
+            _activePublication = publish(sample, cancellationToken).AsTask();
+            return new ValueTask(_activePublication);
+        }
+    }
+
+    public void TriggerFault(Exception exception)
+    {
+        Action<Exception> fault;
+        lock (_gate)
+        {
+            fault = _fault ?? throw new InvalidOperationException("The fake reader is not active.");
+        }
+
+        fault(exception);
     }
 
     public ValueTask WriteRumbleAsync(byte weak, byte strong, CancellationToken cancellationToken)
@@ -924,17 +1289,24 @@ internal sealed class FakeMotionSource : IClawMotionSource
 
 internal sealed class FakeChordSuppressor : IFirmwareChordSuppressor
 {
-    public ValueTask<bool> StartAsync(CancellationToken cancellationToken)
+    private Action<Exception>? _fault;
+
+    public ValueTask<bool> StartAsync(Action<Exception> fault, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        _fault = fault;
         return ValueTask.FromResult(true);
     }
 
     public ValueTask StopAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        _fault = null;
         return ValueTask.CompletedTask;
     }
+
+    public void TriggerFault(Exception exception) =>
+        (_fault ?? throw new InvalidOperationException("The fake hook is not active."))(exception);
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
