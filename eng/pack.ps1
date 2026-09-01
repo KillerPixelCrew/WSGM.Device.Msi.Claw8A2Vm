@@ -35,7 +35,12 @@ $source = Join-Path $root "src\WSGM.Device.Msi.Claw8A2Vm"
 $project = Join-Path $source "WSGM.Device.Msi.Claw8A2Vm.csproj"
 $deviceLabRoot = Join-Path $root "external\WSGM.DeviceLab"
 $deviceLabProject = Join-Path $deviceLabRoot "src\WSGM.DeviceLab\WSGM.DeviceLab.csproj"
-$outputFull = [IO.Path]::GetFullPath((Join-Path $root $OutputRoot))
+$outputFull = if ([IO.Path]::IsPathRooted($OutputRoot)) {
+    [IO.Path]::GetFullPath($OutputRoot)
+}
+else {
+    [IO.Path]::GetFullPath((Join-Path $root $OutputRoot))
+}
 $workRoot = Join-Path $outputFull (".wsgm-pack-{0}" -f [Guid]::NewGuid().ToString("N"))
 $workMarker = Join-Path $workRoot ".wsgm-generated-output"
 $workMarkerValue = "claw-package-work-v1"
