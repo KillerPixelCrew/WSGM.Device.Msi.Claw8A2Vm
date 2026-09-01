@@ -25,7 +25,9 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$RuntimeIdentifier = "win-x64",
 
-    [string]$DeviceLabExecutable = ""
+    [string]$DeviceLabExecutable = "",
+
+    [switch]$NoRestore
 )
 
 Set-StrictMode -Version Latest
@@ -44,6 +46,10 @@ else {
 $workRoot = Join-Path $outputFull (".wsgm-pack-{0}" -f [Guid]::NewGuid().ToString("N"))
 $workMarker = Join-Path $workRoot ".wsgm-generated-output"
 $workMarkerValue = "claw-package-work-v1"
+$restoreArguments = @()
+if ($NoRestore) {
+    $restoreArguments += "--no-restore"
+}
 
 if (-not (Test-Path -LiteralPath (Join-Path $root "external\WSGM.Device.Sdk\src") -PathType Container)) {
     throw "external\WSGM.Device.Sdk is empty. Clone with --recursive, or run: git submodule update --init"
@@ -105,6 +111,7 @@ New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
     /p:PlatformTarget=x64 `
     /p:PublishSingleFile=false `
     /p:TreatWarningsAsErrors=true `
+    @restoreArguments `
     -m:1
 if ($LASTEXITCODE -ne 0) {
     throw "Publishing the plugin failed."
@@ -156,6 +163,7 @@ if ([string]::IsNullOrWhiteSpace($validator)) {
         --output $deviceLabOutput `
         /p:PublishSingleFile=false `
         /p:TreatWarningsAsErrors=true `
+        @restoreArguments `
         -m:1
     if ($LASTEXITCODE -ne 0) {
         throw "Publishing the commit-pinned Device Lab failed."
