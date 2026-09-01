@@ -3,9 +3,9 @@
     Assembles the device package, validates it offline, and packs the distributable archive.
 
 .DESCRIPTION
-    This produces the exact bytes a release ships and WSGM pins. The order matters: the package is
-    assembled first, then validated by a pinned Device Lab, then packed from the validated tree.
-    Validating after packing would prove nothing about what was packed.
+    This produces the exact bytes a release ships. The order matters: the package is assembled
+    first, then validated by the commit-pinned Device Lab submodule, then packed from the validated
+    tree. Validating after packing would prove nothing about what was packed.
 
     Validation is offline and never loads plugin code — it checks the manifest, the package layout
     and that the entry assembly is a managed x64 image. Nothing here touches hardware.
@@ -23,7 +23,9 @@ param(
     [string]$Configuration = "Release",
 
     [ValidateNotNullOrEmpty()]
-    [string]$RuntimeIdentifier = "win-x64"
+    [string]$RuntimeIdentifier = "win-x64",
+
+    [string]$DeviceLabExecutable = ""
 )
 
 Set-StrictMode -Version Latest
@@ -31,6 +33,8 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $root "src\WSGM.Device.Msi.Claw8A2Vm"
 $project = Join-Path $source "WSGM.Device.Msi.Claw8A2Vm.csproj"
+$deviceLabRoot = Join-Path $root "external\WSGM.DeviceLab"
+$deviceLabProject = Join-Path $deviceLabRoot "src\WSGM.DeviceLab\WSGM.DeviceLab.csproj"
 $outputFull = [IO.Path]::GetFullPath((Join-Path $root $OutputRoot))
 $workRoot = Join-Path $outputFull (".wsgm-pack-{0}" -f [Guid]::NewGuid().ToString("N"))
 $workMarker = Join-Path $workRoot ".wsgm-generated-output"
@@ -38,6 +42,20 @@ $workMarkerValue = "claw-package-work-v1"
 
 if (-not (Test-Path -LiteralPath (Join-Path $root "external\WSGM.Device.Sdk\src") -PathType Container)) {
     throw "external\WSGM.Device.Sdk is empty. Clone with --recursive, or run: git submodule update --init"
+}
+if ([string]::IsNullOrWhiteSpace($DeviceLabExecutable)) {
+    if (-not (Test-Path -LiteralPath $deviceLabProject -PathType Leaf)) {
+        throw "external\WSGM.DeviceLab is empty. Clone with --recursive, or run: git submodule update --init --recursive"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $deviceLabRoot "external\WSGM.Device.Sdk\src") -PathType Container)) {
+        throw "Device Lab's SDK submodule is empty. Run: git submodule update --init --recursive"
+    }
+}
+else {
+    $DeviceLabExecutable = [IO.Path]::GetFullPath($DeviceLabExecutable)
+    if (-not (Test-Path -LiteralPath $DeviceLabExecutable -PathType Leaf)) {
+        throw "The supplied Device Lab executable does not exist: $DeviceLabExecutable"
+    }
 }
 
 # The manifest is the authority on id, version and entry assembly. Reading them from it rather than
@@ -123,8 +141,25 @@ if ($profileCount -eq 0) {
 }
 Write-Host "Staged $($glyphFiles.Count) glyph file(s), $profileCount profile(s)"
 
-$deviceLab = & (Join-Path $PSScriptRoot "acquire-devicelab.ps1")
-$validator = Join-Path $deviceLab "wsgm-device.exe"
+$validator = $DeviceLabExecutable
+if ([string]::IsNullOrWhiteSpace($validator)) {
+    $deviceLabOutput = Join-Path $workRoot "DeviceLab"
+    & dotnet publish $deviceLabProject `
+        --configuration $Configuration `
+        --runtime $RuntimeIdentifier `
+        --self-contained false `
+        --output $deviceLabOutput `
+        /p:PublishSingleFile=false `
+        /p:TreatWarningsAsErrors=true `
+        -m:1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Publishing the commit-pinned Device Lab failed."
+    }
+    $validator = Join-Path $deviceLabOutput "wsgm-device.exe"
+}
+if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
+    throw "Device Lab did not produce its executable: $validator"
+}
 
 $validation = @(& $validator validate $packageDirectory 2>&1)
 if ($LASTEXITCODE -ne 0) {

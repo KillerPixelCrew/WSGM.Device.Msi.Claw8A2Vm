@@ -17,8 +17,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
         with:
-          # external/WSGM.Device.Sdk is a submodule. Without this it checks out empty and the
-          # build fails on an unresolvable project path rather than on the missing checkout.
+          # The SDK and Device Lab are submodules; the latter also carries its SDK recursively.
           submodules: recursive
 
       - name: Set up .NET SDK
@@ -35,7 +34,6 @@ jobs:
         run: dotnet test WSGM.Device.Msi.Claw8A2Vm.slnx --configuration Release --no-build
 
       - name: Pack
-        # Proves the package still assembles and passes the pinned validator, which is a different
-        # question from whether the code compiles.
+        # Proves the package still assembles and passes the commit-pinned validator.
         run: ./eng/pack.ps1
         shell: pwsh

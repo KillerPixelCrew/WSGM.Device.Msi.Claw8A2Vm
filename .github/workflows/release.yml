@@ -46,8 +46,7 @@ jobs:
           "path=$($package.FullName)" >> $env:GITHUB_OUTPUT
           "name=$($package.Name)"     >> $env:GITHUB_OUTPUT
           "sha256=$hash"              >> $env:GITHUB_OUTPUT
-          # WSGM pins this package by digest, so the digest ships with it rather than being
-          # something a consumer has to download the asset to learn.
+          # Publish a digest so direct-download consumers can verify the asset.
           "SHA-256: $hash" | Set-Content -Path "$($package.FullName).sha256"
 
       - name: Publish release
@@ -57,10 +56,9 @@ jobs:
             ${{ steps.pack.outputs.path }}
             ${{ steps.pack.outputs.path }}.sha256
           body: |
-            MSI Claw 8 AI+ A2VM device plugin, validated and packed by the pinned Device Lab.
+            MSI Claw 8 AI+ A2VM device plugin, validated and packed by the commit-pinned Device Lab.
 
             `${{ steps.pack.outputs.name }}`
             SHA-256 `${{ steps.pack.outputs.sha256 }}`
 
-            Pin this in a consuming repository by asset URL and digest. Do not re-push an existing
-            tag: it rebuilds the asset, which is never byte-identical and breaks every pin.
+            Do not re-push an existing tag: it rebuilds and replaces the release asset.

@@ -47,8 +47,8 @@ dotnet build WSGM.Device.Msi.Claw8A2Vm.slnx
 dotnet test  WSGM.Device.Msi.Claw8A2Vm.slnx
 ```
 
-`--recursive` matters: `external/WSGM.Device.Sdk` is a submodule, and without it the build fails on
-an unresolvable project path rather than saying what is missing.
+`--recursive` matters: the SDK and Device Lab are commit-pinned submodules. Without them, the build
+or packaging step fails on an empty project path.
 
 The tests are unattended and hardware-free. They drive the plugin through `PluginTestKit` against
 fake transports, which is the only kind of test that belongs in CI — the real behaviour is only ever
@@ -61,10 +61,10 @@ proven on the device.
 ```
 
 This publishes framework-dependent (WSGM loads the plugin into its own process, which already has
-the runtime), validates the assembled package with a **pinned** Device Lab, then packs the
-`.wsgmpkg`. The order is deliberate: validating after packing would prove nothing about what was
-packed, and "it passed validation" means nothing without saying which validator said so — hence the
-pin in `third_party/devicelab/devicelab.lock.json`.
+the runtime), validates the assembled package with Device Lab built from its pinned submodule
+commit, then packs the `.wsgmpkg`. The order is deliberate: validating after packing would prove
+nothing about what was packed, and the Git link records exactly which validator source performed
+the validation.
 
 ## Installing
 
