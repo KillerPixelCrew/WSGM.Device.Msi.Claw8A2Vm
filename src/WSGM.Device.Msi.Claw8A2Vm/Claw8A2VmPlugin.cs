@@ -1039,21 +1039,21 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 DisplayKey.FanMode,
                 ["automatic", "custom", "full-speed"],
                 writable: true,
-                section: SectionIds.Cooling,
+                section: SectionIds.Power,
                 category: CategoryIds.Control),
             FanCurveDescriptor(CapabilityInstances.Left, order: 1),
             FanCurveDescriptor(CapabilityInstances.Right, order: 2),
             IntegerDescriptor(CapabilityIds.FanRpm, CapabilityRole.FanMeasuredRpm,
                 DisplayKey.FanLeft, 0, 10_000, CapabilityUnit.Rpm, writable: false,
                 CapabilityInstances.Left,
-                section: SectionIds.Cooling, category: CategoryIds.Readings, order: 0),
+                section: SectionIds.Power, category: CategoryIds.Readings, order: 0),
             IntegerDescriptor(CapabilityIds.FanRpm, CapabilityRole.FanMeasuredRpm,
                 DisplayKey.FanRight, 0, 10_000, CapabilityUnit.Rpm, writable: false,
                 CapabilityInstances.Right,
-                section: SectionIds.Cooling, category: CategoryIds.Readings, order: 1),
+                section: SectionIds.Power, category: CategoryIds.Readings, order: 1),
             IntegerDescriptor(CapabilityIds.Temperature, CapabilityRole.Telemetry,
                 DisplayKey.CpuTemperature, 0, 110, CapabilityUnit.Celsius, writable: false,
-                section: SectionIds.Cooling, category: CategoryIds.Readings, order: 2),
+                section: SectionIds.Power, category: CategoryIds.Readings, order: 2),
             IntegerDescriptor(CapabilityIds.LightingBrightness, CapabilityRole.LightingBrightness,
                 DisplayKey.Brightness, 0, 100, CapabilityUnit.Percent, writable: true,
                 persistence: CapabilityPersistence.DevicePersistent,
@@ -1608,7 +1608,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             SectionId = SectionIds.Power,
             Key = SettingSectionKey.Power,
             Icon = SectionIcon.Power,
-            CustomDescription = "Performance scenario, power limits, and charging",
+            CustomDescription = "Power limits, charging, fans, and thermals",
             SortOrder = 0,
             Categories =
             [
@@ -1626,30 +1626,21 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                     CustomTitle = "Charging",
                     SortOrder = 1,
                 },
-            ],
-        },
-        new CapabilitySection
-        {
-            SectionId = SectionIds.Cooling,
-            Key = SettingSectionKey.Fans,
-            Icon = SectionIcon.Fan,
-            CustomDescription = "Fan control, curves, and thermal readings",
-            SortOrder = 1,
-            Categories =
-            [
+                // Fans and thermals were their own Cooling section; folded in here so Power is one
+                // page instead of two that both read as "power" to the user (maintainer-directed).
                 new CapabilityCategory
                 {
                     CategoryId = CategoryIds.Control,
                     Key = SettingSectionKey.Custom,
-                    CustomTitle = "Control",
-                    SortOrder = 0,
+                    CustomTitle = "Fans",
+                    SortOrder = 2,
                 },
                 new CapabilityCategory
                 {
                     CategoryId = CategoryIds.Readings,
                     Key = SettingSectionKey.Custom,
-                    CustomTitle = "Readings",
-                    SortOrder = 1,
+                    CustomTitle = "Thermals",
+                    SortOrder = 3,
                 },
             ],
         },
@@ -1694,7 +1685,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         CapabilityId = CapabilityIds.FanCurve,
         InstanceId = instance,
         Role = CapabilityRole.FanCurve,
-        SectionId = SectionIds.Cooling,
+        SectionId = SectionIds.Power,
         CategoryId = CategoryIds.Control,
         SortOrder = order,
         ValueKind = CapabilityValueKind.Curve,
@@ -1711,19 +1702,19 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         string instance,
         string label,
         int order) => new()
-    {
-        CapabilityId = CapabilityIds.LightingColor,
-        InstanceId = instance,
-        Role = CapabilityRole.LightingZoneColor,
-        SectionId = SectionIds.Lighting,
-        CategoryId = CategoryIds.Zones,
-        SortOrder = order,
-        ValueKind = CapabilityValueKind.Color,
-        Display = new CapabilityDisplay { Key = DisplayKey.Custom, CustomLabel = label },
-        SupportsRead = true,
-        SupportsWrite = true,
-        Persistence = CapabilityPersistence.DevicePersistent,
-    };
+        {
+            CapabilityId = CapabilityIds.LightingColor,
+            InstanceId = instance,
+            Role = CapabilityRole.LightingZoneColor,
+            SectionId = SectionIds.Lighting,
+            CategoryId = CategoryIds.Zones,
+            SortOrder = order,
+            ValueKind = CapabilityValueKind.Color,
+            Display = new CapabilityDisplay { Key = DisplayKey.Custom, CustomLabel = label },
+            SupportsRead = true,
+            SupportsWrite = true,
+            Persistence = CapabilityPersistence.DevicePersistent,
+        };
 
     private async ValueTask PublishCapabilityStatesAsync(CancellationToken cancellationToken)
     {
@@ -2407,6 +2398,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     /// <param name="id">Capability id.</param>
     /// <param name="role">Semantic role, which must be one the SDK maps to <c>None</c>.</param>
     /// <param name="display">Display key.</param>
+    /// <param name="section">Overlay section id the row is grouped under, or null for the default.</param>
+    /// <param name="order">Sort order within the section; lower sorts first.</param>
     /// <returns>The descriptor.</returns>
     private static CapabilityDescriptor ActionDescriptor(
         string id,
