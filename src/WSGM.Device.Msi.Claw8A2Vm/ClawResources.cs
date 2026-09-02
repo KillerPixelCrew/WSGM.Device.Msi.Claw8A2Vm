@@ -489,6 +489,22 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
     /// </remarks>
     internal static readonly TimeSpan MaximumMotionAge = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>The last reading with its angular velocity zeroed: a device at rest.</summary>
+    /// <remarks>
+    /// The ISH gyrometer suppresses unchanged readings, so on a still device the stream simply
+    /// stops — that is the normal case for a stale reading, not a fault. Publishing nothing here
+    /// turned every pause into freefall for Steam's sensor fusion (accelerometer dropping from 1g
+    /// to zero), and the first micro-movement snapped it back: the crosshair jumped every time the
+    /// player stopped moving (device-observed 2026-09-02). Rest keeps the gravity reference and
+    /// states the one thing a quiet change-sensitive sensor does imply: no rotation.
+    /// </remarks>
+    private static MotionSample Rest(MotionSample sample) => sample with
+    {
+        GyroX = 0f,
+        GyroY = 0f,
+        GyroZ = 0f,
+    };
+
     public MotionSample? Latest => Volatile.Read(ref _latest);
 
     /// <summary>The last reading, or null once it is too old to still describe the device.</summary>
@@ -513,16 +529,16 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
         }
 
         // Once per stall, never per sample: this is called from the controller reader at about
-        // 125 Hz, and a stalled sensor would otherwise fill the log with one line per report.
+        // 125 Hz, and a quiet sensor would otherwise fill the log with one line per report.
         if (Interlocked.Exchange(ref _staleReported, 1) == 0)
         {
-            PluginTrace.Warn(
+            PluginTrace.Info(
                 "motion",
-                $"Gyroscope reading is {(now - stamp).TotalMilliseconds:F0} ms old; motion is "
-                + "dropped from controller samples until the sensor reports again.");
+                $"Gyroscope reading is {(now - stamp).TotalMilliseconds:F0} ms old; publishing "
+                + "rest (zero angular velocity, held gravity) until the sensor reports again.");
         }
 
-        return null;
+        return Rest(sample);
     }
 
     public async ValueTask<ClawServiceResult> AcquireAsync(

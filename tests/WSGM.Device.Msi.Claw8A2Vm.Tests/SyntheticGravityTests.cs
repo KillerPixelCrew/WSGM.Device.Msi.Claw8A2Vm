@@ -72,19 +72,33 @@ public sealed class SyntheticGravityTests
     }
 
     [Fact]
-    public void ATimestampGapResetsInsteadOfInventingRotation()
+    public void ATimestampGapHoldsTheVectorWithoutInventingRotation()
+    {
+        SyntheticGravity gravity = new();
+        // 45 degrees of real rotation, then half a second of sensor silence. A quiet gyrometer
+        // means a still device (the ISH suppresses unchanged readings), so the vector must hold
+        // its transported direction — neither integrate across the gap nor snap back to +Y.
+        MotionSample beforeGap = Feed(gravity, x: 90f, steps: 50, stepMs: 10);
+        MotionSample afterGap = gravity.WithSyntheticAccelerometer(
+            Gyro(90f, 0f, 0f, T0.AddSeconds(1)));
+
+        Assert.Equal(beforeGap.AccelX, afterGap.AccelX, 3);
+        Assert.Equal(beforeGap.AccelY, afterGap.AccelY, 3);
+        Assert.Equal(beforeGap.AccelZ, afterGap.AccelZ, 3);
+    }
+
+    [Fact]
+    public void ABackwardsClockResetsToTheInitialReference()
     {
         SyntheticGravity gravity = new();
         Feed(gravity, x: 90f, steps: 50, stepMs: 10);
 
-        // Half a second of missing history: the end rate says nothing about the gap, so the
-        // vector must return to the initial reference rather than integrate across it.
-        MotionSample afterGap = gravity.WithSyntheticAccelerometer(
-            Gyro(90f, 0f, 0f, T0.AddSeconds(1)));
+        MotionSample afterJump = gravity.WithSyntheticAccelerometer(
+            Gyro(0f, 0f, 0f, T0.AddSeconds(-1)));
 
-        Assert.Equal(0f, afterGap.AccelX, 3);
-        Assert.Equal(1f, afterGap.AccelY, 3);
-        Assert.Equal(0f, afterGap.AccelZ, 3);
+        Assert.Equal(0f, afterJump.AccelX, 3);
+        Assert.Equal(1f, afterJump.AccelY, 3);
+        Assert.Equal(0f, afterJump.AccelZ, 3);
     }
 
     [Fact]

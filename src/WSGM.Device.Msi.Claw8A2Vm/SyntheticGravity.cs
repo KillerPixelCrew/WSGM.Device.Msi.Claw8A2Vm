@@ -18,11 +18,13 @@ namespace WSGM.Device.Msi.Claw8A2Vm;
 /// This is short-term dead reckoning, not gravity estimation: the vector starts at app-space +Y
 /// (the device-proven value) and is transported into the rotating body frame by the gyro via
 /// Rodrigues' rotation, so short-term tilt stays consistent with the angular velocity Steam also
-/// receives. Without an absolute reference the direction drifts; the two guards that bound it are
-/// stillness-based gyro-bias nulling (the dominant drift source) and a hard reset on any timestamp
-/// discontinuity rather than integrating across it — a gap's end rate says nothing about the
-/// rotation inside the gap. There is deliberately no decay toward the initial vector: rotating the
-/// reported gravity while the gyro reads zero is a self-contradictory IMU stream.
+/// receives. Without an absolute reference the direction drifts; the guard that bounds it is
+/// stillness-based gyro-bias nulling (the dominant drift source). A long timestamp gap is never
+/// integrated across — the gap's end rate says nothing about the rotation inside it — but the
+/// vector holds rather than resets, because on this sensor a quiet stretch means a still device
+/// (the ISH suppresses unchanged readings), not lost history. There is deliberately no decay
+/// toward the initial vector: rotating the reported gravity while the gyro reads zero is a
+/// self-contradictory IMU stream.
 /// </para>
 /// <para>
 /// The bias correction is internal only. The published gyro stays raw, because Steam runs its own
@@ -33,10 +35,10 @@ internal sealed class SyntheticGravity
 {
     private static readonly Vector3 InitialUp = new(0f, 1f, 0f);
 
-    /// <summary>Longest gap integrated as one step; anything above resets the orientation.</summary>
+    /// <summary>Longest gap integrated as one step; anything above holds the vector instead.</summary>
     /// <remarks>
     /// Five 100 Hz sensor periods. The rate at the end of a longer stall is not evidence of the
-    /// average rate during it — clamping instead of resetting can invent a large phantom rotation.
+    /// average rate during it — clamping instead of skipping can invent a large phantom rotation.
     /// </remarks>
     internal static readonly TimeSpan MaximumIntegrationStep = TimeSpan.FromMilliseconds(50);
 
@@ -89,11 +91,21 @@ internal sealed class SyntheticGravity
                     {
                         Rotate(gyro - _bias, (float)dt.TotalSeconds);
                     }
-                    else if (dt < TimeSpan.Zero || dt > MaximumIntegrationStep)
+                    else if (dt < TimeSpan.Zero)
                     {
-                        // The angular history across the discontinuity is unknown; rebasing on the
-                        // new timestamp keeps every following sample from failing the same check.
+                        // A backwards clock is a genuine discontinuity: the vector's history no
+                        // longer describes anything, so reset and rebase.
                         _up = InitialUp;
+                        _windowStart = null;
+                    }
+                    else if (dt > MaximumIntegrationStep)
+                    {
+                        // A long positive gap is the ISH gyrometer suppressing unchanged readings
+                        // on a still device — routine, not a fault. The device did not rotate
+                        // while the sensor was quiet, so the vector HOLDS; only the stillness
+                        // window restarts (its mean would otherwise span the gap). Resetting here
+                        // snapped gravity back to +Y after every pause, which itself jerked
+                        // Steam's fusion (device-observed 2026-09-02).
                         _windowStart = null;
                     }
                     // dt == 0 is the same sensor reading riding a later publication: hold.
