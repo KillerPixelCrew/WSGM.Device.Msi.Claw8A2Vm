@@ -430,8 +430,9 @@ public sealed class ClawPluginTests
         CapabilityDescriptorSet descriptors = Assert.Single(host.DescriptorSets);
 
         // The overlay layout ships with the set, and a dangling reference would silently strand a
-        // row in a WSGM fallback group.
-        Assert.Equal(5, descriptors.Sections.Count);
+        // row in a WSGM fallback group. Cooling was folded into Power (maintainer-directed), so
+        // the Device overlay is four sections.
+        Assert.Equal(4, descriptors.Sections.Count);
         Assert.All(descriptors.Sections, section =>
         {
             Assert.True(section.TryValidate(out string? sectionError), sectionError);

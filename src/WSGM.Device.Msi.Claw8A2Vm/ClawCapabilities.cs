@@ -971,7 +971,6 @@ internal static class CapabilityInstances
 internal static class SectionIds
 {
     public const string Power = "power";
-    public const string Cooling = "cooling";
     public const string Lighting = "lighting";
     public const string Input = "input";
     public const string Display = "display";
