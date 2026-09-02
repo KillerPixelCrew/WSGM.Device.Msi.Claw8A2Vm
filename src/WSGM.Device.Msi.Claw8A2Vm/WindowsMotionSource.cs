@@ -10,6 +10,7 @@ namespace WSGM.Device.Msi.Claw8A2Vm;
 internal sealed class WindowsClawMotionSource : IClawMotionSource
 {
     private readonly object _gate = new();
+    private readonly SyntheticGravity _gravity = new();
     private Gyrometer? _gyrometer;
     private Channel<MotionSample>? _samples;
     private CancellationTokenSource? _pumpCancellation;
@@ -37,6 +38,7 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
 
             uint requested = Math.Max(gyrometer.MinimumReportInterval, 10u);
             gyrometer.ReportInterval = requested;
+            _gravity.Reset();
             _samples = Channel.CreateBounded<MotionSample>(new BoundedChannelOptions(8)
             {
                 FullMode = BoundedChannelFullMode.DropOldest,
@@ -99,7 +101,10 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
     private void OnReadingChanged(Gyrometer sender, GyrometerReadingChangedEventArgs args)
     {
         GyrometerReading reading = args.Reading;
-        _samples?.Writer.TryWrite(new MotionSample
+        // The synthesized accelerometer is device policy: this board's real accelerometer is
+        // unreachable on Windows, and Steam disables Deck gyro processing entirely over an
+        // all-zero (freefall) accelerometer. See SyntheticGravity for the derivation and limits.
+        _samples?.Writer.TryWrite(_gravity.WithSyntheticAccelerometer(new MotionSample
         {
             GyroX = (float)reading.AngularVelocityX,
             GyroY = (float)reading.AngularVelocityY,
@@ -107,7 +112,7 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
             HasGyro = true,
             HasAccelerometer = false,
             SensorTimestamp = reading.Timestamp,
-        });
+        }));
     }
 
     private static async Task PumpAsync(
