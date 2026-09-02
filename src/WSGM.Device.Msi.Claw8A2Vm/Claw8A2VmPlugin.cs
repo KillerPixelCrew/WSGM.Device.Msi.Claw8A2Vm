@@ -2211,9 +2211,11 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
 
     private PluginStartResult CurrentStartResult()
     {
-        int owned = _serviceStatuses.Count(service => service.State is ClawServiceState.Owned);
-        bool unhealthy = _serviceStatuses.Any(service => service.State is not ClawServiceState.Owned);
-        ClawServiceStatus? firstUnhealthy = _serviceStatuses.FirstOrDefault(
+        IEnumerable<ClawServiceStatus> requiredServices = _serviceStatuses.Where(
+            service => service != _controller || _controller.Enabled);
+        int owned = requiredServices.Count(service => service.State is ClawServiceState.Owned);
+        bool unhealthy = requiredServices.Any(service => service.State is not ClawServiceState.Owned);
+        ClawServiceStatus? firstUnhealthy = requiredServices.FirstOrDefault(
             service => service.State is not ClawServiceState.Owned);
         PluginStartResult result = new()
         {

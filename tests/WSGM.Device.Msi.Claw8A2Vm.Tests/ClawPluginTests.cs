@@ -396,6 +396,24 @@ public sealed class ClawPluginTests
     }
 
     [Fact]
+    public async Task StartAsync_ControllerManagementOffIsAnIntentionalActiveState()
+    {
+        using TemporaryDirectory state = new();
+        await using Claw8A2VmPlugin plugin = new(CreateServices());
+        TestPluginHostAdapter host = new(CycleGeneration);
+
+        PluginStartResult result = await plugin.StartAsync(
+            StartContext(host, state.Root),
+            CancellationToken.None);
+
+        Assert.Equal(PluginOperationalState.Active, result.State);
+        Assert.Contains(host.CapabilityStates, capability =>
+            capability.CapabilityId == CapabilityIds.Controller
+            && !capability.Available
+            && capability.Reason?.Code == CapabilityReasonCode.ResourceReleased);
+    }
+
+    [Fact]
     public async Task StartAsync_FakeHardware_PublishesDirectCapabilityAndOemSurfaces()
     {
         using TemporaryDirectory state = new();
@@ -408,7 +426,7 @@ public sealed class ClawPluginTests
             CancellationToken.None);
         await oem.EmitAsync(0x2A, DateTimeOffset.UnixEpoch);
 
-        Assert.Equal(PluginOperationalState.Degraded, result.State);
+        Assert.Equal(PluginOperationalState.Active, result.State);
         CapabilityDescriptorSet descriptors = Assert.Single(host.DescriptorSets);
 
         // The overlay layout ships with the set, and a dangling reference would silently strand a
