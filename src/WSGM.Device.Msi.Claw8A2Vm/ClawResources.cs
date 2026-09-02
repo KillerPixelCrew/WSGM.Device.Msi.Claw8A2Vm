@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 using WSGM.Device.Sdk.Capabilities;
@@ -489,27 +490,22 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
     /// </remarks>
     internal static readonly TimeSpan MaximumMotionAge = TimeSpan.FromMilliseconds(250);
 
-    /// <summary>The last reading with its angular velocity zeroed: a device at rest.</summary>
-    /// <remarks>
-    /// The ISH gyrometer suppresses unchanged readings, so on a still device the stream simply
-    /// stops — that is the normal case for a stale reading, not a fault. Publishing nothing here
-    /// turned every pause into freefall for Steam's sensor fusion (accelerometer dropping from 1g
-    /// to zero), and the first micro-movement snapped it back: the crosshair jumped every time the
-    /// player stopped moving (device-observed 2026-09-02). Rest keeps the gravity reference and
-    /// states the one thing a quiet change-sensitive sensor does imply: no rotation.
-    /// </remarks>
-    private static MotionSample Rest(MotionSample sample) => sample with
-    {
-        GyroX = 0f,
-        GyroY = 0f,
-        GyroZ = 0f,
-    };
+    private readonly GyroFrameResampler _resampler = new();
 
     public MotionSample? Latest => Volatile.Read(ref _latest);
 
-    /// <summary>The last reading, or null once it is too old to still describe the device.</summary>
+    /// <summary>The motion to attach to the controller sample being published now.</summary>
     /// <param name="now">Current time, from the caller's clock.</param>
-    /// <returns>The reading to attach, or null when motion has gone stale.</returns>
+    /// <returns>
+    /// The last reading with its angular velocity replaced by the frame-average since the previous
+    /// call, or null before the first reading arrives.
+    /// </returns>
+    /// <remarks>
+    /// The sensor updates at 100 Hz under a ~125 Hz controller reader, so raw values ride frames
+    /// unevenly in a repeating beat that Steam integrates as jagged angular steps. The resampled
+    /// average preserves the exact integrated angle per frame and decays to zero when the sensor
+    /// goes quiet, which is also what keeps a still device from ever reading as freefall.
+    /// </remarks>
     public MotionSample? Current(DateTimeOffset now)
     {
         if (Volatile.Read(ref _latest) is not { } sample)
@@ -523,22 +519,30 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
             return sample;
         }
 
-        if (now - stamp <= MaximumMotionAge)
+        if (now - stamp > MaximumMotionAge)
         {
-            return sample;
+            // Once per quiet stretch, never per sample: this is called from the controller reader
+            // at about 125 Hz. A quiet gyrometer is a still device (the ISH suppresses unchanged
+            // readings); the resampled average below decays to zero on its own while the held
+            // gravity keeps Steam's fusion anchored, so nothing is dropped here any more —
+            // publishing nothing turned every pause into freefall and made the crosshair jump when
+            // the player stopped moving (device-observed 2026-09-02).
+            if (Interlocked.Exchange(ref _staleReported, 1) == 0)
+            {
+                PluginTrace.Info(
+                    "motion",
+                    $"Gyroscope reading is {(now - stamp).TotalMilliseconds:F0} ms old; holding "
+                    + "rest (decayed angular velocity, held gravity) until the sensor reports again.");
+            }
         }
 
-        // Once per stall, never per sample: this is called from the controller reader at about
-        // 125 Hz, and a quiet sensor would otherwise fill the log with one line per report.
-        if (Interlocked.Exchange(ref _staleReported, 1) == 0)
+        Vector3 average = _resampler.FrameAverage(now);
+        return sample with
         {
-            PluginTrace.Info(
-                "motion",
-                $"Gyroscope reading is {(now - stamp).TotalMilliseconds:F0} ms old; publishing "
-                + "rest (zero angular velocity, held gravity) until the sensor reports again.");
-        }
-
-        return Rest(sample);
+            GyroX = average.X,
+            GyroY = average.Y,
+            GyroZ = average.Z,
+        };
     }
 
     public async ValueTask<ClawServiceResult> AcquireAsync(
@@ -549,7 +553,14 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
             sample =>
             {
                 Volatile.Write(ref _latest, sample);
-                // A fresh reading ends the stall, and re-arms the one-shot report for the next one.
+                if (sample.SensorTimestamp is { } stamp)
+                {
+                    _resampler.OnReading(
+                        new Vector3(sample.GyroX, sample.GyroY, sample.GyroZ),
+                        stamp);
+                }
+
+                // A fresh reading ends the quiet stretch, and re-arms its one-shot report.
                 if (Interlocked.Exchange(ref _staleReported, 0) != 0)
                 {
                     PluginTrace.Info("motion", "Gyroscope readings resumed.");
@@ -585,6 +596,89 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
         await _source.StopAsync(cancellationToken).ConfigureAwait(false);
         Volatile.Write(ref _latest, null);
         return Set(ClawServiceState.Idle);
+    }
+}
+
+/// <summary>
+/// Area-preserving resampler from the gyrometer's 100 Hz cadence onto the controller frames.
+/// </summary>
+/// <remarks>
+/// Attaching raw readings to ~125 Hz frames makes some frames repeat a stale value and others jump
+/// two sensor periods, in a repeating 40 ms beat that integrates as jagged angular steps. Each
+/// frame instead reports the average angular velocity over exactly the interval since the previous
+/// frame, computed from the zero-order-held sensor integral: the total rotation Steam integrates
+/// stays exact, the beat disappears, and no latency is added. A reading older than
+/// <see cref="MotionService.MaximumMotionAge"/> stops contributing, so the average decays to zero
+/// on a quiet (still) sensor rather than replaying the last angular velocity forever.
+/// </remarks>
+internal sealed class GyroFrameResampler
+{
+    private readonly object _gate = new();
+    private Vector3 _omega;
+    private DateTimeOffset _quietCap;
+    private DateTimeOffset? _accountedTo;
+    private Vector3 _pendingDegrees;
+    private DateTimeOffset? _lastFrame;
+    private Vector3 _lastAverage;
+
+    /// <summary>Feeds one sensor reading, accumulating the angle the previous one covered.</summary>
+    /// <param name="omegaDegreesPerSecond">Angular velocity in the published basis.</param>
+    /// <param name="stamp">The reading's sensor timestamp.</param>
+    public void OnReading(Vector3 omegaDegreesPerSecond, DateTimeOffset stamp)
+    {
+        lock (_gate)
+        {
+            AdvanceUnderGate(stamp);
+            _omega = omegaDegreesPerSecond;
+            _quietCap = stamp + MotionService.MaximumMotionAge;
+        }
+    }
+
+    /// <summary>Returns the average angular velocity since the previous frame.</summary>
+    /// <param name="now">The controller frame's timestamp.</param>
+    /// <returns>Degrees per second whose integral over the frame equals the sensor's.</returns>
+    public Vector3 FrameAverage(DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            AdvanceUnderGate(now);
+            if (_lastFrame is not { } previous || now <= previous)
+            {
+                // First frame, or a non-advancing frame clock: the held reading is the only
+                // defensible answer, and pending angle stays banked for the next real frame.
+                _lastFrame ??= now;
+                return _lastAverage = _omega;
+            }
+
+            _lastAverage = _pendingDegrees / (float)(now - previous).TotalSeconds;
+            _pendingDegrees = Vector3.Zero;
+            _lastFrame = now;
+            return _lastAverage;
+        }
+    }
+
+    private void AdvanceUnderGate(DateTimeOffset to)
+    {
+        if (_accountedTo is not { } from)
+        {
+            _accountedTo = to;
+            return;
+        }
+
+        if (to <= from)
+        {
+            return;
+        }
+
+        // The held velocity covers time only up to the quiet cap; beyond it the sensor's silence
+        // means stillness and the integral stops growing.
+        DateTimeOffset covered = to < _quietCap ? to : _quietCap;
+        if (covered > from)
+        {
+            _pendingDegrees += _omega * (float)(covered - from).TotalSeconds;
+        }
+
+        _accountedTo = to;
     }
 }
 
