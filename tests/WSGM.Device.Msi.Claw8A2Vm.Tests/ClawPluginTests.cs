@@ -410,6 +410,27 @@ public sealed class ClawPluginTests
 
         Assert.Equal(PluginOperationalState.Degraded, result.State);
         CapabilityDescriptorSet descriptors = Assert.Single(host.DescriptorSets);
+
+        // The overlay layout ships with the set, and a dangling reference would silently strand a
+        // row in a WSGM fallback group.
+        Assert.Equal(5, descriptors.Sections.Count);
+        Assert.All(descriptors.Sections, section =>
+        {
+            Assert.True(section.TryValidate(out string? sectionError), sectionError);
+        });
+        Assert.All(
+            descriptors.Descriptors,
+            descriptor =>
+            {
+                Assert.NotNull(descriptor.SectionId);
+                CapabilitySection home = Assert.Single(
+                    descriptors.Sections,
+                    section => section.SectionId == descriptor.SectionId);
+                if (descriptor.CategoryId is { } categoryId)
+                {
+                    Assert.Single(home.Categories, category => category.CategoryId == categoryId);
+                }
+            });
         Assert.Equal(CycleGeneration, descriptors.CycleGeneration);
         Assert.Contains(descriptors.Descriptors, descriptor =>
             descriptor.CapabilityId == CapabilityIds.PowerSustained);

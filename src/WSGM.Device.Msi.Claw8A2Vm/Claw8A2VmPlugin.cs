@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using WSGM.Device.Sdk.Capabilities;
+using WSGM.Device.Sdk.Settings;
 using WSGM.Device.Sdk.Input;
 using WSGM.Device.Sdk.Lifecycle;
 using WSGM.Device.Sdk.Plugin;
@@ -1011,44 +1012,55 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         [
             IntegerDescriptor(CapabilityIds.PowerSustained, CapabilityRole.PowerSustainedLimit,
                 // 37 W, matching PL2 and the device's actual ceiling, not the 30 W it ships at.
-                DisplayKey.SustainedPowerLimit, 8, 37, CapabilityUnit.Watt, writable: true),
+                DisplayKey.SustainedPowerLimit, 8, 37, CapabilityUnit.Watt, writable: true,
+                section: SectionIds.Power, category: CategoryIds.Limits, order: 0),
             IntegerDescriptor(CapabilityIds.PowerBoost, CapabilityRole.PowerSlowLimit,
-                DisplayKey.BoostPowerLimit, 8, 37, CapabilityUnit.Watt, writable: true),
+                DisplayKey.BoostPowerLimit, 8, 37, CapabilityUnit.Watt, writable: true,
+                section: SectionIds.Power, category: CategoryIds.Limits, order: 1),
             IntegerDescriptor(CapabilityIds.ChargeLimit, CapabilityRole.ChargeLimit,
                 DisplayKey.ChargeLimit,
                 ClawA2VmChargeLimitCapability.MinimumPercent,
                 ClawA2VmChargeLimitCapability.MaximumPercent,
                 CapabilityUnit.Percent,
                 writable: true,
-                persistence: CapabilityPersistence.DevicePersistent),
+                persistence: CapabilityPersistence.DevicePersistent,
+                section: SectionIds.Power,
+                category: CategoryIds.Charging),
             ChoiceDescriptor(
                 CapabilityIds.Scenario,
                 CapabilityRole.ScenarioMode,
                 DisplayKey.PerformanceProfile,
                 ["comfort", "green", "eco", "user", "sport"],
-                writable: false),
+                writable: false,
+                section: SectionIds.Power),
             ChoiceDescriptor(
                 CapabilityIds.FanMode,
                 CapabilityRole.FanMode,
                 DisplayKey.FanMode,
                 ["automatic", "custom", "full-speed"],
-                writable: true),
-            FanCurveDescriptor(CapabilityInstances.Left),
-            FanCurveDescriptor(CapabilityInstances.Right),
+                writable: true,
+                section: SectionIds.Cooling,
+                category: CategoryIds.Control),
+            FanCurveDescriptor(CapabilityInstances.Left, order: 1),
+            FanCurveDescriptor(CapabilityInstances.Right, order: 2),
             IntegerDescriptor(CapabilityIds.FanRpm, CapabilityRole.FanMeasuredRpm,
                 DisplayKey.FanLeft, 0, 10_000, CapabilityUnit.Rpm, writable: false,
-                CapabilityInstances.Left),
+                CapabilityInstances.Left,
+                section: SectionIds.Cooling, category: CategoryIds.Readings, order: 0),
             IntegerDescriptor(CapabilityIds.FanRpm, CapabilityRole.FanMeasuredRpm,
                 DisplayKey.FanRight, 0, 10_000, CapabilityUnit.Rpm, writable: false,
-                CapabilityInstances.Right),
+                CapabilityInstances.Right,
+                section: SectionIds.Cooling, category: CategoryIds.Readings, order: 1),
             IntegerDescriptor(CapabilityIds.Temperature, CapabilityRole.Telemetry,
-                DisplayKey.CpuTemperature, 0, 110, CapabilityUnit.Celsius, writable: false),
+                DisplayKey.CpuTemperature, 0, 110, CapabilityUnit.Celsius, writable: false,
+                section: SectionIds.Cooling, category: CategoryIds.Readings, order: 2),
             IntegerDescriptor(CapabilityIds.LightingBrightness, CapabilityRole.LightingBrightness,
                 DisplayKey.Brightness, 0, 100, CapabilityUnit.Percent, writable: true,
-                persistence: CapabilityPersistence.DevicePersistent),
-            LightingColorDescriptor(CapabilityInstances.RightRing, "Right ring"),
-            LightingColorDescriptor(CapabilityInstances.LeftRing, "Left ring"),
-            LightingColorDescriptor(CapabilityInstances.Buttons, "Buttons"),
+                persistence: CapabilityPersistence.DevicePersistent,
+                section: SectionIds.Lighting),
+            LightingColorDescriptor(CapabilityInstances.LeftRing, "Left ring", order: 0),
+            LightingColorDescriptor(CapabilityInstances.RightRing, "Right ring", order: 1),
+            LightingColorDescriptor(CapabilityInstances.Buttons, "Buttons", order: 2),
             // These three carry the value kinds their roles require. ControllerSource and
             // MotionSource are choices because "who owns this source" has more than two answers —
             // the plugin can hold it, the device can still have it, or acquisition can have failed —
@@ -1063,14 +1075,23 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 CapabilityRole.ControllerSource,
                 DisplayKey.Controller,
                 SourceOwnershipChoices,
-                writable: false),
+                writable: false,
+                section: SectionIds.Input,
+                order: 0),
             ChoiceDescriptor(
                 CapabilityIds.Motion,
                 CapabilityRole.MotionSource,
                 DisplayKey.Motion,
                 SourceOwnershipChoices,
-                writable: false),
-            ActionDescriptor(CapabilityIds.Rumble, CapabilityRole.HapticSink, DisplayKey.Rumble),
+                writable: false,
+                section: SectionIds.Input,
+                order: 1),
+            ActionDescriptor(
+                CapabilityIds.Rumble,
+                CapabilityRole.HapticSink,
+                DisplayKey.Rumble,
+                section: SectionIds.Input,
+                order: 2),
             .. _arcSync?.IsAvailable == true
                 ?
                 [
@@ -1082,7 +1103,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                         CapabilityIds.VariableRefreshRate,
                         CapabilityRole.VariableRefreshRate,
                         DisplayKey.VariableRefreshRate,
-                        writable: true) with
+                        writable: true,
+                        section: SectionIds.Display) with
                     {
                         Persistence = CapabilityPersistence.DevicePersistent,
                     },
@@ -1095,6 +1117,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         {
             Generation = 1,
             CycleGeneration = _cycleGeneration,
+            Sections = OverlaySections,
             Descriptors = descriptors,
         };
     }
@@ -1572,11 +1595,108 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     private static string CapabilityKey(string capabilityId, string? instanceId) =>
         instanceId is null ? capabilityId : $"{capabilityId}/{instanceId}";
 
-    private static CapabilityDescriptor FanCurveDescriptor(string instance) => new()
+    /// <summary>The Claw's declared Device overlay layout.</summary>
+    /// <remarks>
+    /// Titles and icons are WSGM-owned vocabulary; only the grouping is this plugin's. A section a
+    /// firmware variant leaves empty (Display without an ARC Sync panel) is dropped by WSGM rather
+    /// than declared conditionally, so the layout stays one static fact.
+    /// </remarks>
+    private static readonly IReadOnlyList<CapabilitySection> OverlaySections =
+    [
+        new CapabilitySection
+        {
+            SectionId = SectionIds.Power,
+            Key = SettingSectionKey.Power,
+            Icon = SectionIcon.Power,
+            CustomDescription = "Performance scenario, power limits, and charging",
+            SortOrder = 0,
+            Categories =
+            [
+                new CapabilityCategory
+                {
+                    CategoryId = CategoryIds.Limits,
+                    Key = SettingSectionKey.Custom,
+                    CustomTitle = "Limits",
+                    SortOrder = 0,
+                },
+                new CapabilityCategory
+                {
+                    CategoryId = CategoryIds.Charging,
+                    Key = SettingSectionKey.Custom,
+                    CustomTitle = "Charging",
+                    SortOrder = 1,
+                },
+            ],
+        },
+        new CapabilitySection
+        {
+            SectionId = SectionIds.Cooling,
+            Key = SettingSectionKey.Fans,
+            Icon = SectionIcon.Fan,
+            CustomDescription = "Fan control, curves, and thermal readings",
+            SortOrder = 1,
+            Categories =
+            [
+                new CapabilityCategory
+                {
+                    CategoryId = CategoryIds.Control,
+                    Key = SettingSectionKey.Custom,
+                    CustomTitle = "Control",
+                    SortOrder = 0,
+                },
+                new CapabilityCategory
+                {
+                    CategoryId = CategoryIds.Readings,
+                    Key = SettingSectionKey.Custom,
+                    CustomTitle = "Readings",
+                    SortOrder = 1,
+                },
+            ],
+        },
+        new CapabilitySection
+        {
+            SectionId = SectionIds.Lighting,
+            Key = SettingSectionKey.Lighting,
+            Icon = SectionIcon.Lighting,
+            CustomDescription = "Ring and button lighting",
+            SortOrder = 2,
+            Categories =
+            [
+                new CapabilityCategory
+                {
+                    CategoryId = CategoryIds.Zones,
+                    Key = SettingSectionKey.Custom,
+                    CustomTitle = "Zones",
+                    SortOrder = 0,
+                },
+            ],
+        },
+        new CapabilitySection
+        {
+            SectionId = SectionIds.Input,
+            Key = SettingSectionKey.Controller,
+            Icon = SectionIcon.Controller,
+            CustomDescription = "Built-in controller, motion, and rumble",
+            SortOrder = 3,
+        },
+        new CapabilitySection
+        {
+            SectionId = SectionIds.Display,
+            Key = SettingSectionKey.Display,
+            Icon = SectionIcon.Display,
+            CustomDescription = "Panel synchronization",
+            SortOrder = 4,
+        },
+    ];
+
+    private static CapabilityDescriptor FanCurveDescriptor(string instance, int order) => new()
     {
         CapabilityId = CapabilityIds.FanCurve,
         InstanceId = instance,
         Role = CapabilityRole.FanCurve,
+        SectionId = SectionIds.Cooling,
+        CategoryId = CategoryIds.Control,
+        SortOrder = order,
         ValueKind = CapabilityValueKind.Curve,
         Display = new CapabilityDisplay
         {
@@ -1587,11 +1707,17 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         Persistence = CapabilityPersistence.Volatile,
     };
 
-    private static CapabilityDescriptor LightingColorDescriptor(string instance, string label) => new()
+    private static CapabilityDescriptor LightingColorDescriptor(
+        string instance,
+        string label,
+        int order) => new()
     {
         CapabilityId = CapabilityIds.LightingColor,
         InstanceId = instance,
         Role = CapabilityRole.LightingZoneColor,
+        SectionId = SectionIds.Lighting,
+        CategoryId = CategoryIds.Zones,
+        SortOrder = order,
         ValueKind = CapabilityValueKind.Color,
         Display = new CapabilityDisplay { Key = DisplayKey.Custom, CustomLabel = label },
         SupportsRead = true,
@@ -2221,11 +2347,17 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         CapabilityUnit unit,
         bool writable,
         string? instance = null,
-        CapabilityPersistence persistence = CapabilityPersistence.Volatile) => new()
+        CapabilityPersistence persistence = CapabilityPersistence.Volatile,
+        string? section = null,
+        string? category = null,
+        int order = 0) => new()
         {
             CapabilityId = id,
             InstanceId = instance,
             Role = role,
+            SectionId = section,
+            CategoryId = category,
+            SortOrder = order,
             ValueKind = CapabilityValueKind.Integer,
             Display = new CapabilityDisplay { Key = display },
             SupportsRead = true,
@@ -2242,10 +2374,16 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         CapabilityRole role,
         DisplayKey display,
         IReadOnlyList<string> choices,
-        bool writable) => new()
+        bool writable,
+        string? section = null,
+        string? category = null,
+        int order = 0) => new()
         {
             CapabilityId = id,
             Role = role,
+            SectionId = section,
+            CategoryId = category,
+            SortOrder = order,
             ValueKind = CapabilityValueKind.Choice,
             Display = new CapabilityDisplay { Key = display },
             SupportsRead = true,
@@ -2273,10 +2411,14 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     private static CapabilityDescriptor ActionDescriptor(
         string id,
         CapabilityRole role,
-        DisplayKey display) => new()
+        DisplayKey display,
+        string? section = null,
+        int order = 0) => new()
         {
             CapabilityId = id,
             Role = role,
+            SectionId = section,
+            SortOrder = order,
             ValueKind = CapabilityValueKind.None,
             Display = new CapabilityDisplay { Key = display },
             SupportsRead = false,
@@ -2291,10 +2433,14 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         string id,
         CapabilityRole role,
         DisplayKey display,
-        bool writable) => new()
+        bool writable,
+        string? section = null,
+        int order = 0) => new()
         {
             CapabilityId = id,
             Role = role,
+            SectionId = section,
+            SortOrder = order,
             ValueKind = CapabilityValueKind.Boolean,
             Display = new CapabilityDisplay { Key = display },
             SupportsRead = true,

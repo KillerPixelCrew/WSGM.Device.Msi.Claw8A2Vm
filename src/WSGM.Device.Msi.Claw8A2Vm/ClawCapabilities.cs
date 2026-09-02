@@ -966,3 +966,23 @@ internal static class CapabilityInstances
     public const string LeftRing = "left-ring";
     public const string Buttons = "buttons";
 }
+
+/// <summary>Overlay sections this plugin declares in its descriptor set.</summary>
+internal static class SectionIds
+{
+    public const string Power = "power";
+    public const string Cooling = "cooling";
+    public const string Lighting = "lighting";
+    public const string Input = "input";
+    public const string Display = "display";
+}
+
+/// <summary>Categories inside the declared overlay sections.</summary>
+internal static class CategoryIds
+{
+    public const string Limits = "limits";
+    public const string Charging = "charging";
+    public const string Control = "control";
+    public const string Readings = "readings";
+    public const string Zones = "zones";
+}
