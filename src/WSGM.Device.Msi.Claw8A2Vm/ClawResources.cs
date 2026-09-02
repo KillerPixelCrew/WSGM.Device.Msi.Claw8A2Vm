@@ -1031,6 +1031,13 @@ internal sealed class ControllerService(
         LeftTrigger = OutputChannelSupport.Unsupported,
         RightTrigger = OutputChannelSupport.Unsupported,
         MaxFramesPerSecond = 250,
+        // ERM motors: LRA-grade haptic ticks must be floored and stretched by the host to be
+        // perceptible at all. Device-measured with the attended A-button sweep (2026-09-02):
+        // 30 ms ticks are felt down to 56/255 and vanish at 48; full-strength pulses stay
+        // reliable to about 10 ms (below that the sleep granularity dominates); continuous
+        // rumble is felt down to 24/255, which is why the floor applies to bounded events only.
+        MinimumStartIntensity = 56f / 255f,
+        MinimumPulse = TimeSpan.FromMilliseconds(10),
     };
 
     public async ValueTask ApplyHapticsAsync(
