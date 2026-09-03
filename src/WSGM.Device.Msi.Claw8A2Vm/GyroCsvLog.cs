@@ -19,8 +19,8 @@ internal sealed class GyroCsvLog : IAsyncDisposable
     internal const string Header =
         "session,fresh_index,poll_index,received_utc,sensor_utc,receive_delta_ms,sensor_delta_ms,"
         + "sensor_age_ms,read_duration_ms,counter,counter_delta,duplicate_polls,read_failures,"
-        + "queue_drops,raw_gyro_x,raw_gyro_y,raw_gyro_z,published_gyro_x,published_gyro_y,"
-        + "published_gyro_z,accel_x,accel_y,accel_z";
+        + "queue_drops,raw_gyro_x,raw_gyro_y,raw_gyro_z,bias_x,bias_y,bias_z,published_gyro_x,"
+        + "published_gyro_y,published_gyro_z,accel_x,accel_y,accel_z";
 
     private const int QueueCapacity = 4096;
     private const int FlushRowCount = 100;
@@ -242,6 +242,7 @@ internal readonly record struct GyroCsvRow(
     int DuplicatePolls,
     int ReadFailures,
     Vector3 RawAngularVelocity,
+    Vector3? Bias,
     Vector3 PublishedAngularVelocity,
     Vector3 Acceleration)
 {
@@ -268,6 +269,15 @@ internal readonly record struct GyroCsvRow(
             .Append(',').Append(ReadFailures)
             .Append(',').Append(droppedRows).Append(',');
         Append(text, RawAngularVelocity);
+        if (Bias is { } bias)
+        {
+            Append(text, bias);
+        }
+        else
+        {
+            text.Append(",,,");
+        }
+
         Append(text, PublishedAngularVelocity);
         Append(text, Acceleration, trailingComma: false);
         return text.ToString();

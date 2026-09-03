@@ -37,7 +37,7 @@ public sealed class WindowsMotionSourceTests
     }
 
     [Fact]
-    public void SubDegreePhysicalGyroRemainsContinuousForTargetCalibration()
+    public void SubDegreePhysicalGyroCrossesTheAxisTransformContinuously()
     {
         var sample = WindowsClawMotionSource.CreateSample(
             new Vector3(0.07f, -0.14f, 0.21f),

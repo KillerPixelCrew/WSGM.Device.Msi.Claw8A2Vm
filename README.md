@@ -23,15 +23,35 @@ This one is a worked example of the parts that are easy to get wrong:
 | `ClawCapabilities.cs` | publishing capabilities and reporting refusals honestly |
 | `MsiWmiPlatform.cs` | the vendor WMI surface behind power and fans |
 | `WindowsHidTransports.cs` | HID transports for OEM controls and lighting |
-| `WindowsMotionSource.cs` | physical legacy-Sensor-API IMU polling, freshness, and raw target delivery |
+| `WindowsMotionSource.cs` | physical legacy-Sensor-API IMU polling, freshness, and zero-rate offset correction |
 | `LegacyPhysicalMotionSensors.cs` | exact Intel ISS/LSM6DSO COM identity, fields, interval ownership, and cleanup |
-| `GyroCsvLog.cs` | bounded, non-blocking raw/published gyroscope cadence diagnostics |
+| `GyroCsvLog.cs` | bounded, non-blocking raw/corrected gyroscope cadence diagnostics |
 | `ArcSyncTransport.cs` | variable refresh through Intel's Graphics Control Library |
 | `ClawRecoveryJournal.cs` | leaving the device safe when a cycle ends badly |
 
 While motion is active, the production source writes `%LOCALAPPDATA%\WSGM\gyro.csv`. It retains one
 `gyro.previous.csv` rotation; each file is capped at 16 MiB. The ordinary WSGM log receives only the
-start path or a writer failure, never the per-report data.
+start path, the measured offset, or a writer failure, never the per-report data.
+
+### This part's gyroscope has a zero-rate offset, and only the plugin can remove it
+
+Intel's ISS stack publishes the LSM6DSO's rates uncorrected. Two eight-minute stationary captures on
+the reference unit, hours apart, both measure the same offset in sensor space:
+
+| | X | Y | Z |
+| --- | --- | --- | --- |
+| offset (degrees/second) | +0.75 | −0.37 | −0.14 |
+| noise, 1σ | 0.13 | 0.07 | 0.06 |
+
+It is a hardware offset, not a mapping or gravity error: it is identical while the device lies flat
+and while it is held tilted, and identical across sessions. Nothing downstream removes it. A Steam
+Deck's own gyroscope arrives offset-free, so Steam integrates whatever a Deck target reports — here
+that was a permanent 12-count pitch and −6-count yaw, drifting the view along one fixed diagonal
+forever. `StationaryGyroBiasCalibrator` therefore measures the offset from ~2 s rest windows and
+subtracts it. Every threshold in it comes from the table above and from the same captures: peak
+stationary spans of 1.47 degrees/second and 0.023 g over 200 reports. Correction is subtraction
+only — a deadband would trade the drift for a dead zone around rest, which is a worse artifact than
+the noise it hides.
 
 ## Hardware knowledge is observed, not documented
 
