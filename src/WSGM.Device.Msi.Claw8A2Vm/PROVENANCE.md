@@ -27,7 +27,10 @@ MSI Claw 8 AI+ A2VM, not from vendor documentation. Two consequences:
   `b14c764f-07cf-41e8-9d82-ebe3d0776a6f`, in g and degrees/second respectively. Field 34 is the
   gyrometer's opaque `VT_UI4` hardware-report counter: it advances for stationary samples too.
   The gyrometer advertises a 10 ms minimum report interval (100 Hz); the accelerometer advertises
-  2 ms. The application-axis transform for both die-aligned sensors is
+  2 ms, but its synchronous `GetData` can still wait about 200 ms for a changed report at rest.
+  Combined reads therefore acquire acceleration first and the gyrometer last so a delayed
+  accelerometer cannot make the published gyro report and timestamp stale. The application-axis
+  transform for both die-aligned sensors is
   `(raw X, raw Z, -raw Y)`; the Steam Deck encoder reverses that once when filling the controller's
   raw IMU slots. WinRT does not project the accelerometer and its gyrometer event path suppresses
   unchanged reports.

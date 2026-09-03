@@ -193,13 +193,16 @@ internal sealed class LegacyPhysicalMotionSensors : IDisposable
                 return false;
             }
 
-            if (!TryReadGyrometer(
+            // The Intel accelerometer's synchronous GetData can wait for its next changed report
+            // while the device is still. Read it first so that the gyrometer report and timestamp
+            // are acquired last, immediately before this combined sample is published.
+            if (!TryReadVector(accelerometer, out Vector3 acceleration, out error)
+                || !TryReadGyrometer(
                     gyrometer,
                     out Vector3 angularVelocity,
                     out DateTimeOffset timestamp,
                     out uint counter,
-                    out error)
-                || !TryReadVector(accelerometer, out Vector3 acceleration, out error))
+                    out error))
             {
                 return false;
             }
