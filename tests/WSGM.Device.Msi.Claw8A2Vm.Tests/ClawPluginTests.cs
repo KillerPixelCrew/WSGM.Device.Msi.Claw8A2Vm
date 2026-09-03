@@ -363,7 +363,7 @@ public sealed class ClawPluginTests
         ClawA2VmFanCapability fan = new(wmi);
         CapabilityCommand command = Command(
             CapabilityIds.FanCurve,
-            CapabilityInstances.Left,
+            instanceId: null,
             new CapabilityValue
             {
                 Kind = CapabilityValueKind.Curve,
@@ -380,15 +380,16 @@ public sealed class ClawPluginTests
 
         CapabilityCommandResult result = await fan.ApplyCurveAsync(
             command,
-            1,
             command.RequestedValue!.CurveValue,
             CancellationToken.None);
 
         Assert.Equal(CommandOutcome.AppliedVerified, result.Outcome);
-        byte[] dutyWrite = Assert.Single(wmi.Writes, write => write.Method == "Set_Fan").Package;
+        byte[] dutyWrite = Assert.Single(
+            wmi.Writes,
+            write => write.Method == "Set_Fan" && write.Package[0] == 1).Package;
         byte[] temperatureWrite = Assert.Single(
             wmi.Writes,
-            write => write.Method == "Set_Temperature").Package;
+            write => write.Method == "Set_Temperature" && write.Package[0] == 1).Package;
         Assert.Equal([0, 40, 50, 60, 70, 80], dutyWrite[2..8]);
         Assert.Equal(0xA1, dutyWrite[1]);
         Assert.Equal(0xA8, dutyWrite[8]);
@@ -397,6 +398,56 @@ public sealed class ClawPluginTests
         Assert.Equal(0xB2, temperatureWrite[2]);
         Assert.Equal(0xB3, temperatureWrite[3]);
     }
+
+    /// The two fans share a heatsink and the firmware ramps them together, so one authored curve
+    /// has to reach both channels or the pair describes a machine that does not exist.
+    [Fact]
+    public async Task ApplyCurveAsync_WritesTheSameCurveToBothFanChannels()
+    {
+        FakeWmiTransport wmi = new();
+        ClawA2VmFanCapability fan = new(wmi);
+        CapabilityCommand command = Command(
+            CapabilityIds.FanCurve,
+            instanceId: null,
+            new CapabilityValue
+            {
+                Kind = CapabilityValueKind.Curve,
+                CurveValue =
+                [
+                    new CurvePoint(0, 0),
+                    new CurvePoint(50, 40),
+                    new CurvePoint(60, 50),
+                    new CurvePoint(70, 60),
+                    new CurvePoint(80, 70),
+                    new CurvePoint(90, 80),
+                ],
+            });
+
+        CapabilityCommandResult result = await fan.ApplyCurveAsync(
+            command,
+            command.RequestedValue!.CurveValue,
+            CancellationToken.None);
+
+        Assert.Equal(CommandOutcome.AppliedVerified, result.Outcome);
+
+        // Only the six curve positions are compared. Every other byte in the package is firmware
+        // data this write preserves per channel, and the two channels do not hold the same values
+        // there — copying one channel's spare bytes onto the other is exactly the bug the
+        // preserve-unknown-bytes test above exists to prevent.
+        byte[] leftDuty = ChannelWrite(wmi, "Set_Fan", channel: 1);
+        byte[] rightDuty = ChannelWrite(wmi, "Set_Fan", channel: 2);
+        Assert.Equal(leftDuty[2..8], rightDuty[2..8]);
+
+        byte[] leftTemperature = ChannelWrite(wmi, "Set_Temperature", channel: 1);
+        byte[] rightTemperature = ChannelWrite(wmi, "Set_Temperature", channel: 2);
+        Assert.Equal(leftTemperature[1], rightTemperature[1]);
+        Assert.Equal(leftTemperature[4..9], rightTemperature[4..9]);
+    }
+
+    private static byte[] ChannelWrite(FakeWmiTransport wmi, string method, byte channel) =>
+        Assert.Single(
+            wmi.Writes,
+            write => write.Method == method && write.Package[0] == channel).Package;
 
     [Fact]
     public async Task StartAsync_ControllerManagementOffIsAnIntentionalActiveState()
@@ -433,9 +484,10 @@ public sealed class ClawPluginTests
         CapabilityDescriptorSet descriptors = Assert.Single(host.DescriptorSets);
 
         // The overlay layout ships with the set, and a dangling reference would silently strand a
-        // row in a WSGM fallback group. Cooling was folded into Power (maintainer-directed), so
-        // the Device overlay is four sections.
-        Assert.Equal(4, descriptors.Sections.Count);
+        // row in a WSGM fallback group. Cooling was folded into Power, then Display's single
+        // variable-refresh toggle joined it and the three ownership rows became Info
+        // (maintainer-directed), so the Device overlay is three sections.
+        Assert.Equal(3, descriptors.Sections.Count);
         Assert.All(descriptors.Sections, section =>
         {
             Assert.True(section.TryValidate(out string? sectionError), sectionError);

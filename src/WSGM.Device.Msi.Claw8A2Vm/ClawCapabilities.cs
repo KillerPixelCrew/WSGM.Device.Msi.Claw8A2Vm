@@ -339,6 +339,10 @@ internal sealed class ClawA2VmFanCapability(IMsiWmiTransport transport)
 {
     private static readonly int[] TemperatureOffsets = [1, 4, 5, 6, 7, 8];
     private static readonly int[] DutyOffsets = [2, 3, 4, 5, 6, 7];
+
+    /// <summary>The firmware's two fan channels, always written together.</summary>
+    private static readonly int[] FanChannels = [1, 2];
+
     private readonly IMsiWmiTransport _transport = transport ?? throw new ArgumentNullException(nameof(transport));
 
     public async ValueTask<FanSnapshot> ReadSnapshotAsync(CancellationToken cancellationToken)
@@ -409,9 +413,21 @@ internal sealed class ClawA2VmFanCapability(IMsiWmiTransport transport)
         return Indeterminate(command, "Fan-mode readback did not match.", rollback);
     }
 
+    /// <summary>Writes one curve to both fan channels as a single all-or-nothing change.</summary>
+    /// <param name="command">The command being served, for the result it returns.</param>
+    /// <param name="curve">The six validated points to install on both channels.</param>
+    /// <param name="cancellationToken">Cancels the write.</param>
+    /// <returns>Verified only when both channels read the curve back.</returns>
+    /// <remarks>
+    /// The A2VM's two fans sit on one heatsink and the firmware ramps them together; a curve that
+    /// applied to one of them would describe a machine that does not exist. Both channels are
+    /// therefore written under ONE pre-write snapshot, so a failure on the second channel restores
+    /// the first as well. Two separate <c>ApplyCurveAsync</c> calls could not: the second call's
+    /// snapshot would already contain the first call's write and would happily "restore" to it,
+    /// leaving the fans running curves that disagree.
+    /// </remarks>
     public async ValueTask<CapabilityCommandResult> ApplyCurveAsync(
         CapabilityCommand command,
-        int channel,
         IReadOnlyList<CurvePoint> curve,
         CancellationToken cancellationToken)
     {
@@ -421,21 +437,28 @@ internal sealed class ClawA2VmFanCapability(IMsiWmiTransport transport)
         }
 
         FanSnapshot before = await ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
-        FanTable current = channel == 1 ? before.Left : before.Right;
-        byte[] temperatures = [.. current.TemperatureBuffer];
-        byte[] duties = [.. current.DutyBuffer];
-        for (int i = 0; i < curve.Count; i++)
-        {
-            temperatures[TemperatureOffsets[i]] = checked((byte)curve[i].Input);
-            duties[DutyOffsets[i]] = checked((byte)curve[i].Output);
-        }
-
         try
         {
-            await WriteTableAsync(channel, temperatures, duties, cancellationToken).ConfigureAwait(false);
-            FanTable readback = await ReadTableAsync(checked((byte)channel), cancellationToken)
-                .ConfigureAwait(false);
-            if (CurveEquals(readback, curve))
+            bool applied = true;
+            foreach (int channel in FanChannels)
+            {
+                FanTable current = channel == 1 ? before.Left : before.Right;
+                byte[] temperatures = [.. current.TemperatureBuffer];
+                byte[] duties = [.. current.DutyBuffer];
+                for (int i = 0; i < curve.Count; i++)
+                {
+                    temperatures[TemperatureOffsets[i]] = checked((byte)curve[i].Input);
+                    duties[DutyOffsets[i]] = checked((byte)curve[i].Output);
+                }
+
+                await WriteTableAsync(channel, temperatures, duties, cancellationToken)
+                    .ConfigureAwait(false);
+                FanTable readback = await ReadTableAsync(checked((byte)channel), cancellationToken)
+                    .ConfigureAwait(false);
+                applied &= CurveEquals(readback, curve);
+            }
+
+            if (applied)
             {
                 return Verified(command, Curve(curve));
             }
@@ -972,8 +995,15 @@ internal static class SectionIds
 {
     public const string Power = "power";
     public const string Lighting = "lighting";
-    public const string Input = "input";
-    public const string Display = "display";
+
+    /// <summary>Read-only ownership and telemetry. Nothing here is a control.</summary>
+    /// <remarks>
+    /// Was <c>input</c>, a page of three rows that only ever reported whether the plugin held the
+    /// pad, the gyro and the rumble sink. That is worth reading when something is wrong and worth
+    /// nothing the rest of the time, so it is no longer a Controller page competing with the one
+    /// that has the actual controller settings on it.
+    /// </remarks>
+    public const string Info = "info";
 }
 
 /// <summary>Categories inside the declared overlay sections.</summary>
@@ -984,4 +1014,5 @@ internal static class CategoryIds
     public const string Control = "control";
     public const string Readings = "readings";
     public const string Zones = "zones";
+    public const string Ownership = "ownership";
 }

@@ -1041,19 +1041,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 writable: true,
                 section: SectionIds.Power,
                 category: CategoryIds.Control),
-            FanCurveDescriptor(CapabilityInstances.Left, order: 1),
-            FanCurveDescriptor(CapabilityInstances.Right, order: 2),
-            IntegerDescriptor(CapabilityIds.FanRpm, CapabilityRole.FanMeasuredRpm,
-                DisplayKey.FanLeft, 0, 10_000, CapabilityUnit.Rpm, writable: false,
-                CapabilityInstances.Left,
-                section: SectionIds.Power, category: CategoryIds.Readings, order: 0),
-            IntegerDescriptor(CapabilityIds.FanRpm, CapabilityRole.FanMeasuredRpm,
-                DisplayKey.FanRight, 0, 10_000, CapabilityUnit.Rpm, writable: false,
-                CapabilityInstances.Right,
-                section: SectionIds.Power, category: CategoryIds.Readings, order: 1),
-            IntegerDescriptor(CapabilityIds.Temperature, CapabilityRole.Telemetry,
-                DisplayKey.CpuTemperature, 0, 110, CapabilityUnit.Celsius, writable: false,
-                section: SectionIds.Power, category: CategoryIds.Readings, order: 2),
+            FanCurveDescriptor(order: 1),
             IntegerDescriptor(CapabilityIds.LightingBrightness, CapabilityRole.LightingBrightness,
                 DisplayKey.Brightness, 0, 100, CapabilityUnit.Percent, writable: true,
                 persistence: CapabilityPersistence.DevicePersistent,
@@ -1076,7 +1064,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 DisplayKey.Controller,
                 SourceOwnershipChoices,
                 writable: false,
-                section: SectionIds.Input,
+                section: SectionIds.Info,
+                category: CategoryIds.Ownership,
                 order: 0),
             ChoiceDescriptor(
                 CapabilityIds.Motion,
@@ -1084,14 +1073,32 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 DisplayKey.Motion,
                 SourceOwnershipChoices,
                 writable: false,
-                section: SectionIds.Input,
+                section: SectionIds.Info,
+                category: CategoryIds.Ownership,
                 order: 1),
             ActionDescriptor(
                 CapabilityIds.Rumble,
                 CapabilityRole.HapticSink,
                 DisplayKey.Rumble,
-                section: SectionIds.Input,
+                section: SectionIds.Info,
+                category: CategoryIds.Ownership,
                 order: 2),
+            // Readings, not controls. They left the Power page because a person opens it to change
+            // how the device behaves, not to watch numbers; the CPU temperature stays published
+            // because the fan-curve editor draws the live temperature against the curve.
+            IntegerDescriptor(CapabilityIds.Temperature, CapabilityRole.Telemetry,
+                DisplayKey.CpuTemperature, 0, 110, CapabilityUnit.Celsius, writable: false,
+                section: SectionIds.Info, category: CategoryIds.Readings, order: 0),
+            // Both fans are still measured separately even though they are driven together: one
+            // failing fan is exactly the fault this page exists to make visible.
+            IntegerDescriptor(CapabilityIds.FanRpm, CapabilityRole.FanMeasuredRpm,
+                DisplayKey.FanLeft, 0, 10_000, CapabilityUnit.Rpm, writable: false,
+                CapabilityInstances.Left,
+                section: SectionIds.Info, category: CategoryIds.Readings, order: 1),
+            IntegerDescriptor(CapabilityIds.FanRpm, CapabilityRole.FanMeasuredRpm,
+                DisplayKey.FanRight, 0, 10_000, CapabilityUnit.Rpm, writable: false,
+                CapabilityInstances.Right,
+                section: SectionIds.Info, category: CategoryIds.Readings, order: 2),
             .. _arcSync?.IsAvailable == true
                 ?
                 [
@@ -1099,12 +1106,16 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                     // descriptor for a panel that cannot do it would draw a row that always
                     // refuses, which is worse than no row: the device-persistent marking is
                     // deliberate, because the driver keeps the profile across a WSGM restart.
+                    //
+                    // It sits under Power rather than in a Display section of its own: one toggle
+                    // does not earn a page, and variable refresh is a decision about how the device
+                    // performs, which is what Power now holds end to end.
                     BooleanDescriptor(
                         CapabilityIds.VariableRefreshRate,
                         CapabilityRole.VariableRefreshRate,
                         DisplayKey.VariableRefreshRate,
                         writable: true,
-                        section: SectionIds.Display) with
+                        section: SectionIds.Power) with
                     {
                         Persistence = CapabilityPersistence.DevicePersistent,
                     },
@@ -1320,7 +1331,6 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         ClawA2VmFanCapability fans,
         CancellationToken cancellationToken)
     {
-        int channel = command.InstanceId == CapabilityInstances.Left ? 1 : 2;
         return JournalCommandAsync(
             ServiceIds.Fans,
             ClawFirmwareIdentities.Wmi,
@@ -1329,7 +1339,6 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 await fans.ReadSnapshotAsync(token).ConfigureAwait(false)),
             (journalCommand, token) => fans.ApplyCurveAsync(
                 journalCommand,
-                channel,
                 journalCommand.RequestedValue!.CurveValue,
                 token),
             cancellationToken);
@@ -1628,19 +1637,14 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 },
                 // Fans and thermals were their own Cooling section; folded in here so Power is one
                 // page instead of two that both read as "power" to the user (maintainer-directed).
+                // The readings that used to follow them moved to Info for the same reason: this is
+                // the page for changing how the device behaves, not for watching it.
                 new CapabilityCategory
                 {
                     CategoryId = CategoryIds.Control,
                     Key = SettingSectionKey.Custom,
                     CustomTitle = "Fans",
                     SortOrder = 2,
-                },
-                new CapabilityCategory
-                {
-                    CategoryId = CategoryIds.Readings,
-                    Key = SettingSectionKey.Custom,
-                    CustomTitle = "Thermals",
-                    SortOrder = 3,
                 },
             ],
         },
@@ -1664,35 +1668,56 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         },
         new CapabilitySection
         {
-            SectionId = SectionIds.Input,
-            Key = SettingSectionKey.Controller,
-            Icon = SectionIcon.Controller,
-            CustomDescription = "Built-in controller, motion, and rumble",
-            SortOrder = 3,
-        },
-        new CapabilitySection
-        {
-            SectionId = SectionIds.Display,
-            Key = SettingSectionKey.Display,
-            Icon = SectionIcon.Display,
-            CustomDescription = "Panel synchronization",
-            SortOrder = 4,
+            SectionId = SectionIds.Info,
+            Key = SettingSectionKey.Custom,
+            CustomTitle = "Info",
+            Icon = SectionIcon.Gauge,
+            CustomDescription = "What the plugin holds, and what the device reports",
+            SortOrder = 5,
+            Categories =
+            [
+                new CapabilityCategory
+                {
+                    CategoryId = CategoryIds.Ownership,
+                    Key = SettingSectionKey.Custom,
+                    CustomTitle = "Plugin ownership",
+                    SortOrder = 0,
+                },
+                new CapabilityCategory
+                {
+                    CategoryId = CategoryIds.Readings,
+                    Key = SettingSectionKey.Custom,
+                    CustomTitle = "Readings",
+                    SortOrder = 1,
+                },
+            ],
         },
     ];
 
-    private static CapabilityDescriptor FanCurveDescriptor(string instance, int order) => new()
+    /// <summary>The one fan curve, applied to both channels.</summary>
+    /// <remarks>
+    /// One capability rather than a left and a right instance. The A2VM's fans share a heatsink and
+    /// the firmware ramps them together, so two independently authored curves described a machine
+    /// that does not exist and made the user set the same thing twice.
+    /// <para>
+    /// The 0-100 bounds are declared, not implied: they are what the firmware accepts for a duty
+    /// byte, and WSGM's curve editor needs a stated range to draw an axis and clamp a drag against.
+    /// An undeclared bound means "no limit" to the router, which would let the editor offer values
+    /// the write would then refuse.
+    /// </para>
+    /// </remarks>
+    private static CapabilityDescriptor FanCurveDescriptor(int order) => new()
     {
         CapabilityId = CapabilityIds.FanCurve,
-        InstanceId = instance,
         Role = CapabilityRole.FanCurve,
         SectionId = SectionIds.Power,
         CategoryId = CategoryIds.Control,
         SortOrder = order,
         ValueKind = CapabilityValueKind.Curve,
-        Display = new CapabilityDisplay
-        {
-            Key = instance == CapabilityInstances.Left ? DisplayKey.FanLeft : DisplayKey.FanRight,
-        },
+        Display = new CapabilityDisplay { Key = DisplayKey.FanCurve },
+        Minimum = 0,
+        Maximum = 100,
+        Unit = CapabilityUnit.Percent,
         SupportsRead = true,
         SupportsWrite = true,
         Persistence = CapabilityPersistence.Volatile,
@@ -1784,10 +1809,11 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
 
         if (descriptor.CapabilityId == CapabilityIds.FanCurve)
         {
+            // The left channel stands for both. Every write installs one curve on the pair, so the
+            // two tables can only disagree if something outside WSGM wrote one of them, and the
+            // next write puts them back together.
             FanSnapshot? value = _fans!.LastObserved;
-            return value is null
-                ? null
-                : Curve(descriptor.InstanceId == CapabilityInstances.Left ? value.Left : value.Right);
+            return value is null ? null : Curve(value.Left);
         }
 
         if (descriptor.CapabilityId == CapabilityIds.FanRpm)
@@ -2410,6 +2436,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     /// <param name="role">Semantic role, which must be one the SDK maps to <c>None</c>.</param>
     /// <param name="display">Display key.</param>
     /// <param name="section">Overlay section id the row is grouped under, or null for the default.</param>
+    /// <param name="category">Category within that section, or null for its lead group.</param>
     /// <param name="order">Sort order within the section; lower sorts first.</param>
     /// <returns>The descriptor.</returns>
     private static CapabilityDescriptor ActionDescriptor(
@@ -2417,11 +2444,13 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         CapabilityRole role,
         DisplayKey display,
         string? section = null,
+        string? category = null,
         int order = 0) => new()
         {
             CapabilityId = id,
             Role = role,
             SectionId = section,
+            CategoryId = category,
             SortOrder = order,
             ValueKind = CapabilityValueKind.None,
             Display = new CapabilityDisplay { Key = display },
