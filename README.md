@@ -25,18 +25,19 @@ This one is a worked example of the parts that are easy to get wrong:
 | `WindowsHidTransports.cs` | HID transports for OEM controls and lighting |
 | `WindowsMotionSource.cs` | physical legacy-Sensor-API IMU polling, freshness, and zero-rate offset correction |
 | `LegacyPhysicalMotionSensors.cs` | exact Intel ISS/LSM6DSO COM identity, fields, interval ownership, and cleanup |
-| `GyroCsvLog.cs` | bounded, non-blocking raw/corrected gyroscope cadence diagnostics |
 | `ArcSyncTransport.cs` | variable refresh through Intel's Graphics Control Library |
 | `ClawRecoveryJournal.cs` | leaving the device safe when a cycle ends badly |
 
-While motion is active, the production source writes `%LOCALAPPDATA%\WSGM\gyro.csv`. It retains one
-`gyro.previous.csv` rotation; each file is capped at 16 MiB. The ordinary WSGM log receives only the
-start path, the measured offset, or a writer failure, never the per-report data.
+Motion writes no per-report file. Nothing here may log at the 100 Hz sensor cadence: a CSV of every
+report cost roughly 10 MB per five minutes of play, which is not a diagnostic anyone should leave on
+a handheld's SSD. The ordinary WSGM log receives transitions only — the measured offset, a read
+failure and its recovery — never per-report data. Investigations that genuinely need the raw stream
+add the capture temporarily and remove it with the finding, as the offset below was.
 
 ### This part's gyroscope has a zero-rate offset, and only the plugin can remove it
 
 Intel's ISS stack publishes the LSM6DSO's rates uncorrected. Two eight-minute stationary captures on
-the reference unit, hours apart, both measure the same offset in sensor space:
+the reference unit, hours apart, both measured the same offset in sensor space:
 
 | | X | Y | Z |
 | --- | --- | --- | --- |
@@ -49,7 +50,8 @@ Deck's own gyroscope arrives offset-free, so Steam integrates whatever a Deck ta
 that was a permanent 12-count pitch and −6-count yaw, drifting the view along one fixed diagonal
 forever. `StationaryGyroBiasCalibrator` therefore measures the offset from ~2 s rest windows and
 subtracts it. Every threshold in it comes from the table above and from the same captures: peak
-stationary spans of 1.47 degrees/second and 0.023 g over 200 reports. Correction is subtraction
+stationary spans of 1.47 degrees/second and 0.023 g over 200 reports. Re-deriving them means
+re-capturing, which is the deliberate cost of not shipping the capture. Correction is subtraction
 only — a deadband would trade the drift for a dead zone around rest, which is a worse artifact than
 the noise it hides.
 

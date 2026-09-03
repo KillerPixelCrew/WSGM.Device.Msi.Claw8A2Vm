@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Numerics;
 using System.Threading;
 using System.Threading.Channels;
@@ -171,14 +170,8 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
         CancellationToken cancellationToken)
     {
         StationaryGyroBiasCalibrator calibrator = new();
-        GyroCsvLog? csv = GyroCsvLog.TryCreateDefault();
         uint? lastCounter = null;
-        DateTimeOffset? previousSensorTimestamp = null;
-        long? previousReceivedTick = null;
-        ulong pollIndex = 0;
         ulong freshIndex = 0;
-        int duplicatePolls = 0;
-        int readFailures = 0;
         bool readFailed = false;
         Vector3? reportedBias = null;
         bool uncalibratedReported = false;
@@ -187,11 +180,8 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
             using PeriodicTimer timer = new(PollInterval);
             while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
-                pollIndex++;
-                long readStarted = Stopwatch.GetTimestamp();
                 if (!sensors.TryRead(out PhysicalMotionReading reading, out string? error))
                 {
-                    readFailures++;
                     if (!readFailed)
                     {
                         readFailed = true;
@@ -209,21 +199,9 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
 
                 if (lastCounter == reading.HardwareCounter)
                 {
-                    duplicatePolls++;
                     continue;
                 }
 
-                long receivedTick = Stopwatch.GetTimestamp();
-                DateTimeOffset receivedTimestamp = DateTimeOffset.UtcNow;
-                uint? counterDelta = lastCounter is { } priorCounter
-                    ? unchecked(reading.HardwareCounter - priorCounter)
-                    : null;
-                double? receiveDelta = previousReceivedTick is { } priorReceivedTick
-                    ? Stopwatch.GetElapsedTime(priorReceivedTick, receivedTick).TotalMilliseconds
-                    : null;
-                double? sensorDelta = previousSensorTimestamp is { } priorSensorTimestamp
-                    ? (reading.Timestamp - priorSensorTimestamp).TotalMilliseconds
-                    : null;
                 freshIndex++;
                 // This IMU's zero-rate offset reaches the wire as a permanent rotation no target
                 // removes: the Deck's own gyro is offset-free in hardware, so Steam integrates
@@ -253,29 +231,8 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
                         + "occurred yet, so its zero-rate offset remains unmeasured.");
                 }
 
-                csv?.Write(new GyroCsvRow(
-                    freshIndex,
-                    pollIndex,
-                    receivedTimestamp,
-                    reading.Timestamp,
-                    receiveDelta,
-                    sensorDelta,
-                    (receivedTimestamp - reading.Timestamp).TotalMilliseconds,
-                    Stopwatch.GetElapsedTime(readStarted, receivedTick).TotalMilliseconds,
-                    reading.HardwareCounter,
-                    counterDelta,
-                    duplicatePolls,
-                    readFailures,
-                    reading.AngularVelocity,
-                    calibrator.Bias,
-                    corrected,
-                    reading.Acceleration));
                 writer.TryWrite(CreateSample(corrected, reading.Timestamp, reading.Acceleration));
                 lastCounter = reading.HardwareCounter;
-                previousReceivedTick = receivedTick;
-                previousSensorTimestamp = reading.Timestamp;
-                duplicatePolls = 0;
-                readFailures = 0;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -284,10 +241,6 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
         finally
         {
             writer.TryComplete();
-            if (csv is not null)
-            {
-                await csv.DisposeAsync().ConfigureAwait(false);
-            }
         }
     }
 
