@@ -158,7 +158,6 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
         ChannelWriter<MotionSample> writer,
         CancellationToken cancellationToken)
     {
-        StationaryGyroBiasCalibrator bias = new();
         GyroCsvLog? csv = GyroCsvLog.TryCreateDefault();
         uint? lastCounter = null;
         DateTimeOffset? previousSensorTimestamp = null;
@@ -168,7 +167,6 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
         int duplicatePolls = 0;
         int readFailures = 0;
         bool readFailed = false;
-        bool calibrationReported = false;
         try
         {
             using PeriodicTimer timer = new(PollInterval);
@@ -211,16 +209,6 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
                 double? sensorDelta = previousSensorTimestamp is { } priorSensorTimestamp
                     ? (reading.Timestamp - priorSensorTimestamp).TotalMilliseconds
                     : null;
-                Vector3 corrected = bias.Correct(reading.AngularVelocity, reading.Acceleration);
-                if (!calibrationReported && bias.Bias is { } calibrated)
-                {
-                    calibrationReported = true;
-                    PluginTrace.Info(
-                        "motion",
-                        $"Physical gyroscope stationary bias calibrated to "
-                        + $"({calibrated.X:F3}, {calibrated.Y:F3}, {calibrated.Z:F3}) degrees/second.");
-                }
-
                 freshIndex++;
                 csv?.Write(new GyroCsvRow(
                     freshIndex,
@@ -236,10 +224,15 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
                     duplicatePolls,
                     readFailures,
                     reading.AngularVelocity,
-                    bias.Bias,
-                    corrected,
+                    reading.AngularVelocity,
                     reading.Acceleration));
-                writer.TryWrite(CreateSample(corrected, reading.Timestamp, reading.Acceleration));
+                // Steam's Deck target expects the physical angular rate and owns its controller
+                // calibration. A device-layer bias/deadband turns sensor noise into discontinuous
+                // pulses and fights that target calibration.
+                writer.TryWrite(CreateSample(
+                    reading.AngularVelocity,
+                    reading.Timestamp,
+                    reading.Acceleration));
                 lastCounter = reading.HardwareCounter;
                 previousReceivedTick = receivedTick;
                 previousSensorTimestamp = reading.Timestamp;
@@ -269,93 +262,5 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
         {
             await publish(sample).ConfigureAwait(false);
         }
-    }
-}
-
-/// <summary>Removes the stationary zero-rate offset without learning normal aiming motion.</summary>
-internal sealed class StationaryGyroBiasCalibrator
-{
-    internal const int RequiredSampleCount = 32;
-    internal const float MaximumCandidateMagnitude = 1.5f;
-    internal const float MaximumCandidateAxisSpan = 0.35f;
-    internal const float MinimumGravityMagnitude = 0.85f;
-    internal const float MaximumGravityMagnitude = 1.15f;
-    internal const float RestDeadband = 0.15f;
-
-    private int _candidateCount;
-    private Vector3 _candidateSum;
-    private Vector3 _candidateMinimum;
-    private Vector3 _candidateMaximum;
-
-    /// <summary>The zero-rate offset fixed for the current device cycle.</summary>
-    public Vector3? Bias { get; private set; }
-
-    /// <summary>Returns bias-corrected physical angular velocity in degrees per second.</summary>
-    public Vector3 Correct(Vector3 angularVelocity, Vector3 acceleration)
-    {
-        if (Bias is { } bias)
-        {
-            return ApplyRestDeadband(angularVelocity - bias);
-        }
-
-        float gravity = acceleration.Length();
-        if (!float.IsFinite(gravity)
-            || gravity < MinimumGravityMagnitude
-            || gravity > MaximumGravityMagnitude
-            || angularVelocity.LengthSquared() > MaximumCandidateMagnitude * MaximumCandidateMagnitude)
-        {
-            ResetCandidate();
-            return angularVelocity;
-        }
-
-        AddCandidate(angularVelocity);
-        Vector3 span = _candidateMaximum - _candidateMinimum;
-        if (span.X > MaximumCandidateAxisSpan
-            || span.Y > MaximumCandidateAxisSpan
-            || span.Z > MaximumCandidateAxisSpan)
-        {
-            ResetCandidate();
-            AddCandidate(angularVelocity);
-        }
-
-        if (_candidateCount < RequiredSampleCount)
-        {
-            // A low, stable startup value is indistinguishable from zero-rate bias. Holding rest
-            // during this short window prevents the offset itself from moving Steam's cursor.
-            return Vector3.Zero;
-        }
-
-        Bias = _candidateSum / _candidateCount;
-        return ApplyRestDeadband(angularVelocity - Bias.Value);
-    }
-
-    private static Vector3 ApplyRestDeadband(Vector3 corrected) =>
-        corrected.LengthSquared() <= RestDeadband * RestDeadband
-            ? Vector3.Zero
-            : corrected;
-
-    private void AddCandidate(Vector3 value)
-    {
-        if (_candidateCount == 0)
-        {
-            _candidateMinimum = value;
-            _candidateMaximum = value;
-        }
-        else
-        {
-            _candidateMinimum = Vector3.Min(_candidateMinimum, value);
-            _candidateMaximum = Vector3.Max(_candidateMaximum, value);
-        }
-
-        _candidateCount++;
-        _candidateSum += value;
-    }
-
-    private void ResetCandidate()
-    {
-        _candidateCount = 0;
-        _candidateSum = default;
-        _candidateMinimum = default;
-        _candidateMaximum = default;
     }
 }

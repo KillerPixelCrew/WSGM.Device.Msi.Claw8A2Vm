@@ -26,8 +26,7 @@ public sealed class GyroCsvLogTests
             DuplicatePolls: 4,
             ReadFailures: 1,
             RawAngularVelocity: new Vector3(0.75f, -0.25f, 1.5f),
-            Bias: new Vector3(0.5f, -0.125f, 0.25f),
-            CorrectedAngularVelocity: new Vector3(0.25f, -0.125f, 1.25f),
+            PublishedAngularVelocity: new Vector3(0.75f, -0.25f, 1.5f),
             Acceleration: new Vector3(0.01f, -0.02f, 0.99f)));
         await log.DisposeAsync();
 
@@ -61,12 +60,44 @@ public sealed class GyroCsvLogTests
             0,
             0,
             Vector3.Zero,
-            null,
             Vector3.Zero,
             Vector3.UnitZ));
         await log.DisposeAsync();
 
         Assert.Equal(new string('x', 1024), await File.ReadAllTextAsync(
+            Path.Combine(temporary.Root, GyroCsvLog.PreviousFileName)));
+        string[] lines = await File.ReadAllLinesAsync(path);
+        Assert.Equal(GyroCsvLog.Header, lines[0]);
+        Assert.Equal(2, lines.Length);
+    }
+
+    [Fact]
+    public async Task RotatesALogFromAnOlderColumnSchema()
+    {
+        using TemporaryDirectory temporary = new();
+        string path = Path.Combine(temporary.Root, GyroCsvLog.FileName);
+        await File.WriteAllTextAsync(path, "old_header\nold_row\n");
+        GyroCsvLog log = GyroCsvLog.Create(path, 1024 * 1024);
+
+        log.Write(new GyroCsvRow(
+            1,
+            1,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch,
+            null,
+            null,
+            0,
+            0,
+            1,
+            null,
+            0,
+            0,
+            Vector3.Zero,
+            Vector3.Zero,
+            Vector3.UnitZ));
+        await log.DisposeAsync();
+
+        Assert.Equal("old_header\nold_row\n", await File.ReadAllTextAsync(
             Path.Combine(temporary.Root, GyroCsvLog.PreviousFileName)));
         string[] lines = await File.ReadAllLinesAsync(path);
         Assert.Equal(GyroCsvLog.Header, lines[0]);

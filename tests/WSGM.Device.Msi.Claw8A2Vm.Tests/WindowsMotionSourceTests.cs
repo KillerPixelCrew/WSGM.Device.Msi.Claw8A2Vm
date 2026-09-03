@@ -36,6 +36,19 @@ public sealed class WindowsMotionSourceTests
         Assert.Equal(0f, sample.AccelZ);
     }
 
+    [Fact]
+    public void SubDegreePhysicalGyroRemainsContinuousForTargetCalibration()
+    {
+        var sample = WindowsClawMotionSource.CreateSample(
+            new Vector3(0.07f, -0.14f, 0.21f),
+            Timestamp,
+            Vector3.UnitZ);
+
+        Assert.Equal(0.07f, sample.GyroX);
+        Assert.Equal(0.21f, sample.GyroY);
+        Assert.Equal(0.14f, sample.GyroZ);
+    }
+
     [Theory]
     [InlineData("Physical Accelerometer", "Physical Accelerometer", "e83af229-8640-4d18-a213-e22675ebb2c3", "HID#VID_8087&PID_0AC2", true)]
     [InlineData("Physical Gyrometer", "Physical Gyrometer", "e83af229-8640-4d18-a213-e22675ebb2c3", "HID#VID_8087&PID_0AC2", true)]
@@ -59,43 +72,4 @@ public sealed class WindowsMotionSourceTests
                 expectedName));
     }
 
-    [Fact]
-    public void StableRestCalibratesBiasAndKeepsSubCountNoiseAtZero()
-    {
-        var calibrator = new StationaryGyroBiasCalibrator();
-        var stationaryBias = new Vector3(0.7f, -0.35f, -0.1f);
-
-        for (int index = 0; index < StationaryGyroBiasCalibrator.RequiredSampleCount; index++)
-        {
-            Assert.Equal(Vector3.Zero, calibrator.Correct(stationaryBias, Vector3.UnitZ));
-        }
-
-        Assert.NotNull(calibrator.Bias);
-        Assert.Equal(stationaryBias.X, calibrator.Bias.Value.X, 3);
-        Assert.Equal(stationaryBias.Y, calibrator.Bias.Value.Y, 3);
-        Assert.Equal(stationaryBias.Z, calibrator.Bias.Value.Z, 3);
-        Assert.Equal(
-            Vector3.Zero,
-            calibrator.Correct(stationaryBias + new Vector3(0.07f, 0f, 0f), Vector3.UnitZ));
-        Vector3 movement = calibrator.Correct(
-            stationaryBias + new Vector3(0.25f, 0f, 0f),
-            Vector3.UnitZ);
-        Assert.Equal(0.25f, movement.X, 3);
-        Assert.Equal(0f, movement.Y, 3);
-        Assert.Equal(0f, movement.Z, 3);
-    }
-
-    [Fact]
-    public void AimingMotionIsNotLearnedAsStationaryBias()
-    {
-        var calibrator = new StationaryGyroBiasCalibrator();
-        var movement = new Vector3(2f, 0f, 0f);
-
-        for (int index = 0; index < StationaryGyroBiasCalibrator.RequiredSampleCount * 2; index++)
-        {
-            Assert.Equal(movement, calibrator.Correct(movement, Vector3.UnitZ));
-        }
-
-        Assert.Null(calibrator.Bias);
-    }
 }

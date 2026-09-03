@@ -23,9 +23,9 @@ This one is a worked example of the parts that are easy to get wrong:
 | `ClawCapabilities.cs` | publishing capabilities and reporting refusals honestly |
 | `MsiWmiPlatform.cs` | the vendor WMI surface behind power and fans |
 | `WindowsHidTransports.cs` | HID transports for OEM controls and lighting |
-| `WindowsMotionSource.cs` | physical legacy-Sensor-API IMU polling, freshness, and stationary bias correction |
+| `WindowsMotionSource.cs` | physical legacy-Sensor-API IMU polling, freshness, and raw target delivery |
 | `LegacyPhysicalMotionSensors.cs` | exact Intel ISS/LSM6DSO COM identity, fields, interval ownership, and cleanup |
-| `GyroCsvLog.cs` | bounded, non-blocking raw/corrected gyroscope cadence diagnostics |
+| `GyroCsvLog.cs` | bounded, non-blocking raw/published gyroscope cadence diagnostics |
 | `ArcSyncTransport.cs` | variable refresh through Intel's Graphics Control Library |
 | `ClawRecoveryJournal.cs` | leaving the device safe when a cycle ends badly |
 
