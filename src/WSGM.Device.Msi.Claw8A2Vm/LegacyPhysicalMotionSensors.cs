@@ -40,6 +40,7 @@ internal sealed class LegacyPhysicalMotionSensors : IDisposable
     private ISensor? _gyrometer;
     private IntervalState _accelerometerInterval;
     private IntervalState _gyrometerInterval;
+    private uint? _lastCounter;
 
     private LegacyPhysicalMotionSensors(
         ISensor accelerometer,
@@ -148,7 +149,7 @@ internal sealed class LegacyPhysicalMotionSensors : IDisposable
                 gyrometerPath!);
             accelerometer = null;
             gyrometer = null;
-            if (!candidate.TryRead(out _, out string? error))
+            if (candidate.TryRead(out _, out string? error) == PhysicalMotionReadResult.Failed)
             {
                 PluginTrace.Warn(
                     "motion",
@@ -178,10 +179,14 @@ internal sealed class LegacyPhysicalMotionSensors : IDisposable
     }
 
     /// <summary>Reads one physical gyroscope report and the latest physical acceleration.</summary>
-    /// <param name="reading">The sensor-space values, timestamp, and opaque hardware counter.</param>
-    /// <param name="error">The decisive COM or value failure when unsuccessful.</param>
-    /// <returns>True only when all values are finite and the gyroscope counter is available.</returns>
-    public bool TryRead(out PhysicalMotionReading reading, out string? error)
+    /// <param name="reading">The sensor-space values and timestamp; meaningful only when fresh.</param>
+    /// <param name="error">The decisive COM or value failure when the read failed.</param>
+    /// <returns>
+    /// Whether this poll produced a new hardware report. Repeat reports are this transport's
+    /// concern, not the caller's: the gyrometer's opaque report counter is the only way to tell
+    /// them apart, and it is read here before the values it would otherwise qualify.
+    /// </returns>
+    public PhysicalMotionReadResult TryRead(out PhysicalMotionReading reading, out string? error)
     {
         lock (_gate)
         {
@@ -190,25 +195,31 @@ internal sealed class LegacyPhysicalMotionSensors : IDisposable
             if (_gyrometer is not { } gyrometer || _accelerometer is not { } accelerometer)
             {
                 error = "the physical IMU handles are closed";
-                return false;
+                return PhysicalMotionReadResult.Failed;
             }
 
             // The Intel accelerometer's synchronous GetData can wait for its next changed report
             // while the device is still. Read it first so that the gyrometer report and timestamp
             // are acquired last, immediately before this combined sample is published.
-            if (!TryReadVector(accelerometer, out Vector3 acceleration, out error)
-                || !TryReadGyrometer(
-                    gyrometer,
-                    out Vector3 angularVelocity,
-                    out DateTimeOffset timestamp,
-                    out uint counter,
-                    out error))
+            if (!TryReadVector(accelerometer, out Vector3 acceleration, out error))
             {
-                return false;
+                return PhysicalMotionReadResult.Failed;
             }
 
-            reading = new PhysicalMotionReading(angularVelocity, acceleration, timestamp, counter);
-            return true;
+            PhysicalMotionReadResult result = TryReadGyrometer(
+                gyrometer,
+                out Vector3 angularVelocity,
+                out DateTimeOffset timestamp,
+                out uint counter,
+                out error);
+            if (result != PhysicalMotionReadResult.Fresh)
+            {
+                return result;
+            }
+
+            _lastCounter = counter;
+            reading = new PhysicalMotionReading(angularVelocity, acceleration, timestamp);
+            return PhysicalMotionReadResult.Fresh;
         }
     }
 
@@ -342,7 +353,7 @@ internal sealed class LegacyPhysicalMotionSensors : IDisposable
     private static bool Supports(ISensor sensor, PropertyKey key) =>
         sensor.SupportsDataField(ref key, out short supported) >= 0 && supported != 0;
 
-    private static bool TryReadGyrometer(
+    private PhysicalMotionReadResult TryReadGyrometer(
         ISensor sensor,
         out Vector3 angularVelocity,
         out DateTimeOffset timestamp,
@@ -360,13 +371,26 @@ internal sealed class LegacyPhysicalMotionSensors : IDisposable
             if (result < 0 || report is null)
             {
                 error = $"Physical Gyrometer GetData returned 0x{result:X8}";
-                return false;
+                return PhysicalMotionReadResult.Failed;
             }
 
-            if (!TryReadVector(report, out angularVelocity, out error)
-                || !TryReadUnsignedValue(report, HardwareReportCounter, out counter, out error))
+            // Poll faster than the 10 ms report interval and roughly four polls in five repeat the
+            // previous report. Qualify the report before marshalling anything else out of it: the
+            // three axis PROPVARIANTs and the SYSTEMTIME below are the bulk of this path's cost and
+            // would only be discarded.
+            if (!TryReadUnsignedValue(report, HardwareReportCounter, out counter, out error))
             {
-                return false;
+                return PhysicalMotionReadResult.Failed;
+            }
+
+            if (_lastCounter == counter)
+            {
+                return PhysicalMotionReadResult.Duplicate;
+            }
+
+            if (!TryReadVector(report, out angularVelocity, out error))
+            {
+                return PhysicalMotionReadResult.Failed;
             }
 
             result = report.GetTimestamp(out SystemTime systemTime);
@@ -375,15 +399,15 @@ internal sealed class LegacyPhysicalMotionSensors : IDisposable
                 error = result < 0
                     ? $"Physical Gyrometer timestamp returned 0x{result:X8}"
                     : "Physical Gyrometer returned an invalid SYSTEMTIME";
-                return false;
+                return PhysicalMotionReadResult.Failed;
             }
 
-            return true;
+            return PhysicalMotionReadResult.Fresh;
         }
         catch (Exception ex) when (ex is COMException or InvalidOperationException)
         {
             error = $"{ex.GetType().Name}: {ex.Message}";
-            return false;
+            return PhysicalMotionReadResult.Failed;
         }
         finally
         {
@@ -750,5 +774,17 @@ internal sealed class LegacyPhysicalMotionSensors : IDisposable
 internal readonly record struct PhysicalMotionReading(
     Vector3 AngularVelocity,
     Vector3 Acceleration,
-    DateTimeOffset Timestamp,
-    uint HardwareCounter);
+    DateTimeOffset Timestamp);
+
+/// <summary>What one poll of the physical IMU produced.</summary>
+internal enum PhysicalMotionReadResult
+{
+    /// <summary>A hardware report the caller has not seen before.</summary>
+    Fresh,
+
+    /// <summary>The sensor repeated its previous report; nothing to publish.</summary>
+    Duplicate,
+
+    /// <summary>The read failed; the reported error names the decisive COM or value fault.</summary>
+    Failed,
+}

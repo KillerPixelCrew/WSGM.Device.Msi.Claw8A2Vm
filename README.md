@@ -55,6 +55,15 @@ re-capturing, which is the deliberate cost of not shipping the capture. Correcti
 only — a deadband would trade the drift for a dead zone around rest, which is a worse artifact than
 the noise it hides.
 
+One case is worth understanding before changing this. A steady yaw is the single motion no
+acceleration gate can separate from rest — a constant-radius turn holds both the rate and the
+acceleration vector still — so a device powered on aboard a moving vehicle measures that turn as its
+offset. No software fixes that without an external heading reference. What the design does instead
+is make it temporary: a run of later windows that agree with each other but not with the stored
+value replaces it. Clamping refinement to a maximum step, which looks like the safe choice, is the
+one thing that must not be done here — every honest window after the turn stops is further away than
+such a clamp allows, so the wrong offset would outlive the entire device cycle.
+
 ## Hardware knowledge is observed, not documented
 
 Every register, report layout and WMI method here was established on a physical device. `PROVENANCE.md`

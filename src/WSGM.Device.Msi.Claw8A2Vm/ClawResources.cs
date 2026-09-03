@@ -491,8 +491,6 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
 
     private readonly GyroFrameResampler _resampler = new();
 
-    public MotionSample? Latest => Volatile.Read(ref _latest);
-
     /// <summary>The motion to attach to the controller sample being published now.</summary>
     /// <param name="now">Current time, from the caller's clock.</param>
     /// <returns>
@@ -621,7 +619,6 @@ internal sealed class GyroFrameResampler
     private DateTimeOffset? _accountedTo;
     private Vector3 _pendingDegrees;
     private DateTimeOffset? _lastFrame;
-    private Vector3 _lastAverage;
 
     /// <summary>Clears all integration state at a device-cycle boundary.</summary>
     public void Reset()
@@ -633,7 +630,6 @@ internal sealed class GyroFrameResampler
             _accountedTo = null;
             _pendingDegrees = default;
             _lastFrame = null;
-            _lastAverage = default;
         }
     }
 
@@ -663,13 +659,13 @@ internal sealed class GyroFrameResampler
                 // First frame, or a non-advancing frame clock: the held reading is the only
                 // defensible answer, and pending angle stays banked for the next real frame.
                 _lastFrame ??= now;
-                return _lastAverage = _omega;
+                return _omega;
             }
 
-            _lastAverage = _pendingDegrees / (float)(now - previous).TotalSeconds;
+            Vector3 average = _pendingDegrees / (float)(now - previous).TotalSeconds;
             _pendingDegrees = Vector3.Zero;
             _lastFrame = now;
-            return _lastAverage;
+            return average;
         }
     }
 

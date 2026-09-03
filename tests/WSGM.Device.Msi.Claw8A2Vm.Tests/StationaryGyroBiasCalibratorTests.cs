@@ -133,15 +133,52 @@ public sealed class StationaryGyroBiasCalibratorTests
     }
 
     [Fact]
-    public void RejectsALaterWindowThatWouldMoveAMeasuredOffsetTooFar()
+    public void OneDistantWindowDoesNotDisturbAMeasuredOffset()
     {
         StationaryGyroBiasCalibrator calibrator = new();
         FeedRestWindow(calibrator);
         Vector3 latched = calibrator.Bias!.Value;
 
-        for (int index = 0; index < StationaryGyroBiasCalibrator.WindowSampleCount * 2; index++)
+        FeedRestWindow(calibrator, MeasuredOffset + new Vector3(0f, 2f, 0f));
+
+        Assert.Equal(latched, calibrator.Bias!.Value);
+    }
+
+    [Fact]
+    public void AStartupYawIsMeasuredAsOffsetButDoesNotSurviveTheDeviceSettling()
+    {
+        // A device powered on aboard a vehicle already turning at a steady 3 degrees/second: the
+        // turn holds gravity at 1 g and the rate steady, so no acceleration gate can tell it from
+        // rest and the turn is measured as the offset. This is the documented limit.
+        StationaryGyroBiasCalibrator calibrator = new();
+        Vector3 turning = MeasuredOffset + new Vector3(0f, -3f, 0f);
+        FeedRestWindow(calibrator, turning);
+        Assert.Equal(-3f + MeasuredOffset.Y, calibrator.Bias!.Value.Y, 3);
+
+        // What must not happen is that the mistake outlives the turn. Once the vehicle stops
+        // turning, agreeing rest windows re-acquire the real offset.
+        for (int window = 0; window < StationaryGyroBiasCalibrator.ReacquireWindowCount; window++)
         {
-            calibrator.Correct(MeasuredOffset + new Vector3(0f, 2f, 0f), Rest);
+            FeedRestWindow(calibrator);
+        }
+
+        Vector3 bias = calibrator.Bias!.Value;
+        Assert.Equal(MeasuredOffset.X, bias.X, 3);
+        Assert.Equal(MeasuredOffset.Y, bias.Y, 3);
+        Assert.Equal(MeasuredOffset.Z, bias.Z, 3);
+    }
+
+    [Fact]
+    public void DisagreeingDistantWindowsDoNotAccumulateTowardReacquisition()
+    {
+        StationaryGyroBiasCalibrator calibrator = new();
+        FeedRestWindow(calibrator);
+        Vector3 latched = calibrator.Bias!.Value;
+
+        // Far from the measured offset, and far from each other: motion, not a moved offset.
+        for (int window = 0; window < StationaryGyroBiasCalibrator.ReacquireWindowCount * 2; window++)
+        {
+            FeedRestWindow(calibrator, MeasuredOffset + new Vector3(0f, window % 2 == 0 ? 2f : -2f, 0f));
         }
 
         Assert.Equal(latched, calibrator.Bias!.Value);

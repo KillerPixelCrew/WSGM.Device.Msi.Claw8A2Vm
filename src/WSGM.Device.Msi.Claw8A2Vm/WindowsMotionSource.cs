@@ -170,7 +170,6 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
         CancellationToken cancellationToken)
     {
         StationaryGyroBiasCalibrator calibrator = new();
-        uint? lastCounter = null;
         ulong freshIndex = 0;
         bool readFailed = false;
         Vector3? reportedBias = null;
@@ -180,7 +179,10 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
             using PeriodicTimer timer = new(PollInterval);
             while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
-                if (!sensors.TryRead(out PhysicalMotionReading reading, out string? error))
+                PhysicalMotionReadResult read = sensors.TryRead(
+                    out PhysicalMotionReading reading,
+                    out string? error);
+                if (read == PhysicalMotionReadResult.Failed)
                 {
                     if (!readFailed)
                     {
@@ -197,7 +199,7 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
                     PluginTrace.Info("motion", "Physical IMU readings resumed.");
                 }
 
-                if (lastCounter == reading.HardwareCounter)
+                if (read == PhysicalMotionReadResult.Duplicate)
                 {
                     continue;
                 }
@@ -232,7 +234,6 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
                 }
 
                 writer.TryWrite(CreateSample(corrected, reading.Timestamp, reading.Acceleration));
-                lastCounter = reading.HardwareCounter;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -258,12 +259,21 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
 
 /// <summary>Subtracts this IMU's measured zero-rate offset without absorbing aiming motion.</summary>
 /// <remarks>
+/// <para>
 /// Correction is plain subtraction: no deadband and no zero-hold, so sensor noise stays continuous
 /// and every rate a target integrates is the rate the die reported. The offset is measured from
-/// rest windows recognized by three device-derived gates, whose thresholds are sized against the
-/// stationary noise recorded in <c>gyro.csv</c> — see the plugin README. A pure yaw rotation is the
-/// one motion no accelerometer gate can distinguish from rest, so a latched offset only ever moves
-/// by a bounded fraction of a bounded correction.
+/// rest windows recognized by three device-derived gates, whose thresholds come from stationary
+/// captures taken on the reference unit — see "This part's gyroscope has a zero-rate offset" in the
+/// plugin README for the measured numbers.
+/// </para>
+/// <para>
+/// A steady yaw is the one motion no acceleration gate can distinguish from rest, so a device that
+/// starts up already turning slowly — on a train or in a car — can measure that turn as its offset.
+/// That is unavoidable without an external heading reference, so the design makes it survivable
+/// instead: the magnitude limit bounds how wrong the value can be, and a run of agreeing windows
+/// re-acquires. A single clamp on refinement would instead freeze the wrong value for the whole
+/// device cycle, because the honest windows that follow are exactly the ones a clamp rejects.
+/// </para>
 /// </remarks>
 internal sealed class StationaryGyroBiasCalibrator
 {
@@ -296,11 +306,18 @@ internal sealed class StationaryGyroBiasCalibrator
     /// </summary>
     internal const float MaximumBiasMagnitude = 5f;
 
-    /// <summary>How far, per axis, a later rest window may pull an already measured offset.</summary>
+    /// <summary>How far, per axis, a rest window may sit from the measured offset and still refine it.</summary>
     internal const float MaximumRefinementDelta = 0.5f;
 
     /// <summary>The fraction of an accepted refinement applied, damping a contaminated window.</summary>
     internal const float RefinementWeight = 0.25f;
+
+    /// <summary>
+    /// Consecutive rest windows that agree with each other but not with the measured offset before
+    /// that offset is replaced outright. One distant window is contamination; a run of them means
+    /// the offset was measured during motion, or the part genuinely drifted past refinement range.
+    /// </summary>
+    internal const int ReacquireWindowCount = 3;
 
     private int _count;
     private Vector3 _angularSum;
@@ -308,6 +325,8 @@ internal sealed class StationaryGyroBiasCalibrator
     private Vector3 _angularMaximum;
     private Vector3 _accelerationMinimum;
     private Vector3 _accelerationMaximum;
+    private Vector3? _distantCandidate;
+    private int _distantCount;
 
     /// <summary>The zero-rate offset measured so far in this device cycle, in degrees/second.</summary>
     /// <remarks>Null until the first rest window completes; corrections pass through until then.</remarks>
@@ -363,17 +382,40 @@ internal sealed class StationaryGyroBiasCalibrator
 
         if (Bias is not { } bias)
         {
-            Bias = candidate;
+            Adopt(candidate);
             return;
         }
 
         Vector3 delta = candidate - bias;
         if (Exceeds(Vector3.Abs(delta), MaximumRefinementDelta))
         {
+            // Too far to be a refinement. Rather than clamp — which would freeze a first offset
+            // measured during a slow turn for the whole device cycle, because every honest window
+            // afterwards is exactly this far away — require a run of windows that agree with each
+            // other, then take the newest outright.
+            _distantCount = _distantCandidate is { } previous
+                && !Exceeds(Vector3.Abs(candidate - previous), MaximumRefinementDelta)
+                ? _distantCount + 1
+                : 1;
+            _distantCandidate = candidate;
+            if (_distantCount >= ReacquireWindowCount)
+            {
+                Adopt(candidate);
+            }
+
             return;
         }
 
         Bias = bias + (delta * RefinementWeight);
+        _distantCandidate = null;
+        _distantCount = 0;
+    }
+
+    private void Adopt(Vector3 candidate)
+    {
+        Bias = candidate;
+        _distantCandidate = null;
+        _distantCount = 0;
     }
 
     private static bool Exceeds(Vector3 value, float limit) =>
