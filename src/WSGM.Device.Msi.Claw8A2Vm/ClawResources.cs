@@ -489,6 +489,17 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
     /// </remarks>
     internal static readonly TimeSpan MaximumMotionAge = TimeSpan.FromMilliseconds(50);
 
+    /// <summary>How long staleness must persist before it is worth a line.</summary>
+    /// <remarks>
+    /// Crossing <see cref="MaximumMotionAge"/> is not news: measured Intel transport jitter puts a
+    /// dense cluster of readings at 51-59 ms, just past the cap, so reporting each crossing produced
+    /// two alternating lines about 1.3 times a second — 7,619 lines and 40% of one day's log. The
+    /// decay those crossings cause is a couple of milliseconds inside a 52 ms interval and is not
+    /// what anyone is being told about. A pause worth reading about outlasts the jitter by an order
+    /// of magnitude.
+    /// </remarks>
+    internal static readonly TimeSpan StaleReportDelay = TimeSpan.FromMilliseconds(500);
+
     private readonly GyroFrameResampler _resampler = new();
 
     /// <summary>The motion to attach to the controller sample being published now.</summary>
@@ -516,19 +527,19 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
             return sample;
         }
 
-        if (now - stamp > MaximumMotionAge)
+        // Crossing MaximumMotionAge is not itself news, and is not tested for here: that threshold
+        // governs the resampler's quiet cap, and the held rest it produces is correct — the average
+        // decays to zero while the last measured acceleration keeps Steam's fusion anchored, so an
+        // Intel transport pause becomes neither continuous rotation nor freefall. Only a pause that
+        // outlasts ordinary jitter tells a reader something. This runs on the ~125 Hz controller
+        // reader, so it reports once per stretch at most.
+        if (now - stamp >= StaleReportDelay && Interlocked.Exchange(ref _staleReported, 1) == 0)
         {
-            // Once per quiet stretch, never per sample: this is called from the controller reader
-            // at about 125 Hz. The resampled average below decays to zero while the last measured
-            // acceleration keeps Steam's fusion anchored, so an Intel transport pause cannot turn
-            // into either continuous rotation or freefall.
-            if (Interlocked.Exchange(ref _staleReported, 1) == 0)
-            {
-                PluginTrace.Info(
-                    "motion",
-                    $"Gyroscope reading is {(now - stamp).TotalMilliseconds:F0} ms old; holding "
-                    + "rest (decayed angular velocity, last measured acceleration) until the sensor reports again.");
-            }
+            PluginTrace.Change(
+                "motion",
+                "freshness",
+                $"Gyroscope reports stopped for over {StaleReportDelay.TotalMilliseconds:F0} ms; "
+                + "holding rest (decayed angular velocity, last measured acceleration) until they resume.");
         }
 
         Vector3 average = _resampler.FrameAverage(now);
@@ -558,10 +569,12 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
                         stamp);
                 }
 
-                // A fresh reading ends the quiet stretch, and re-arms its one-shot report.
+                // A fresh reading ends the quiet stretch and re-arms its one-shot report. The
+                // resume line is owed only where the pause was actually reported, so a crossing
+                // too brief to mention stays unmentioned at both ends.
                 if (Interlocked.Exchange(ref _staleReported, 0) != 0)
                 {
-                    PluginTrace.Info("motion", "Gyroscope readings resumed.");
+                    PluginTrace.Change("motion", "freshness", "Gyroscope reports resumed.");
                 }
 
                 return ValueTask.CompletedTask;

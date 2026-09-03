@@ -1927,6 +1927,15 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             {
                 return;
             }
+            catch (OperationCanceledException)
+            {
+                // A pass abandoned by an inner linked or timeout token, not by this loop. It is not
+                // a failure — the next pass retries — but the filter above only recognises this
+                // loop's own token, so every one of these reached the failure branch below: 3,492
+                // warnings in one archived log, all of them a device quiescing normally. Keep
+                // polling, and keep the evidence at a level that does not bury the log.
+                PluginTrace.Debug("observe", "periodic observation refresh was cancelled; retrying.");
+            }
             catch (Exception ex) when (ex is not OutOfMemoryException)
             {
                 PluginTrace.Failure("observe", "periodic observation refresh failed", ex);
