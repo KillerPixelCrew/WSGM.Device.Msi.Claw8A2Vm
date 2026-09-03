@@ -1,6 +1,6 @@
 # WSGM Device Plugin — MSI Claw 8 AI+ A2VM
 
-The device plugin that teaches [WSGM](https://github.com/NightHammer1000/WSGM) an MSI Claw 8 AI+
+The device plugin that teaches [WSGM](https://github.com/KillerPixelCrew/WSGM) an MSI Claw 8 AI+
 A2VM: power and charge limits, fan behaviour, lighting, the controller and its motion sensors, the
 OEM buttons, variable refresh, and the physical glyphs shown in Steam.
 
@@ -23,7 +23,7 @@ This one is a worked example of the parts that are easy to get wrong:
 | `ClawCapabilities.cs` | publishing capabilities and reporting refusals honestly |
 | `MsiWmiPlatform.cs` | the vendor WMI surface behind power and fans |
 | `WindowsHidTransports.cs` | HID transports for OEM controls and lighting |
-| `WindowsMotionSource.cs` | motion samples at rate, without logging per sample |
+| `WindowsMotionSource.cs` | WinRT gyroscope plus the legacy custom accelerometer, without per-sample logging |
 | `ArcSyncTransport.cs` | variable refresh through Intel's Graphics Control Library |
 | `ClawRecoveryJournal.cs` | leaving the device safe when a cycle ends badly |
 
@@ -70,7 +70,7 @@ the validation.
 
 WSGM ships this package as its built-in device component, so a normal WSGM install already has it.
 To install a build of your own, see
-[the authoring guide](https://github.com/NightHammer1000/WSGM/blob/master/docs/device-plugin-authoring.md) —
+[the authoring guide](https://github.com/KillerPixelCrew/WSGM/blob/2.0/docs/device-plugin-authoring.md) —
 in short, expand the `.wsgmpkg` into a fresh directory and hand it to
 `WSGM.exe --install-device-plugin`, which validates it again before replacing the protected slot.
 

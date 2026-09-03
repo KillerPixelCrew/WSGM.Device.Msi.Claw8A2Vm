@@ -1,6 +1,6 @@
 # MSI Claw 8 AI+ A2VM plugin provenance
 
-Source revision: `HW-2026-08-27`
+Source revision: `HW-2026-09-03`
 
 The package is first-party code licensed under the MIT License. It is the reference implementation
 of the WSGM Device SDK — the plugin other device plugins are expected to be read against and copied
@@ -20,3 +20,8 @@ MSI Claw 8 AI+ A2VM, not from vendor documentation. Two consequences:
   as it already ships in `System32` with the Intel driver. No Intel code is redistributed here; the
   blittable structures mirror the published `igcl_api.h` layouts so the driver's own size checks
   pass, and a layout regression test pins them.
+- Intel's IO/sensor driver exposes the STMicroelectronics LSM6DSO `Physical Accelerometer` only
+  through the legacy Sensor API as custom sensor type `e83af229-8640-4d18-a213-e22675ebb2c3` on
+  the `VID_8087&PID_0AC2` HID collection. Its live values are `VT_R4` fields 7, 8, and 9 under
+  property-set `b14c764f-07cf-41e8-9d82-ebe3d0776a6f`, in g. The application-axis transform is
+  `(raw X, raw Z, -raw Y)`. WinRT does not project this custom sensor as an `Accelerometer`.

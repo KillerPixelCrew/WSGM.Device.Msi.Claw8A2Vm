@@ -523,8 +523,8 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
         {
             // Once per quiet stretch, never per sample: this is called from the controller reader
             // at about 125 Hz. A quiet gyrometer is a still device (the ISH suppresses unchanged
-            // readings); the resampled average below decays to zero on its own while the held
-            // gravity keeps Steam's fusion anchored, so nothing is dropped here any more —
+            // readings); the resampled average below decays to zero on its own while the last
+            // measured acceleration keeps Steam's fusion anchored, so nothing is dropped here —
             // publishing nothing turned every pause into freefall and made the crosshair jump when
             // the player stopped moving (device-observed 2026-09-02).
             if (Interlocked.Exchange(ref _staleReported, 1) == 0)
@@ -532,7 +532,7 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
                 PluginTrace.Info(
                     "motion",
                     $"Gyroscope reading is {(now - stamp).TotalMilliseconds:F0} ms old; holding "
-                    + "rest (decayed angular velocity, held gravity) until the sensor reports again.");
+                    + "rest (decayed angular velocity, last measured acceleration) until the sensor reports again.");
             }
         }
 
@@ -573,7 +573,7 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
             ? Set(ClawServiceState.Owned)
             : Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.PrerequisiteMissing,
-                "The Intel ISS gyrometer was unavailable; no accelerometer fallback exists."));
+                "The Intel ISS gyrometer or legacy physical accelerometer was unavailable; no synthetic fallback exists."));
     }
 
     public async ValueTask<ClawServiceResult> SuspendAsync(
