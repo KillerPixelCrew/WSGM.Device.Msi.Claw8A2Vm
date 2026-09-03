@@ -4,8 +4,11 @@ using WSGM.Device.Sdk.Testing;
 
 namespace WSGM.Device.Msi.Claw8A2Vm.Tests;
 
-public sealed class MotionFreshnessReportingTests
+[Collection("plugin-trace")]
+public sealed class MotionFreshnessReportingTests : IDisposable
 {
+    public void Dispose() => PluginTrace.Install(null);
+
     private static readonly DateTimeOffset Start = new(2026, 9, 3, 18, 0, 0, TimeSpan.Zero);
 
     [Fact]

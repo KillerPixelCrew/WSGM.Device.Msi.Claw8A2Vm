@@ -11,6 +11,9 @@ using WSGM.Device.Sdk.Testing;
 
 namespace WSGM.Device.Tests;
 
+// PluginTrace is a process-wide static and the plugin installs its own sink in StartAsync, so any
+// class that drives the lifecycle has to be serialized against one that asserts on traces.
+[Collection("plugin-trace")]
 public sealed class ClawPluginTests
 {
     [Fact]
