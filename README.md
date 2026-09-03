@@ -25,8 +25,13 @@ This one is a worked example of the parts that are easy to get wrong:
 | `WindowsHidTransports.cs` | HID transports for OEM controls and lighting |
 | `WindowsMotionSource.cs` | physical legacy-Sensor-API IMU polling, freshness, and stationary bias correction |
 | `LegacyPhysicalMotionSensors.cs` | exact Intel ISS/LSM6DSO COM identity, fields, interval ownership, and cleanup |
+| `GyroCsvLog.cs` | bounded, non-blocking raw/corrected gyroscope cadence diagnostics |
 | `ArcSyncTransport.cs` | variable refresh through Intel's Graphics Control Library |
 | `ClawRecoveryJournal.cs` | leaving the device safe when a cycle ends badly |
+
+While motion is active, the production source writes `%LOCALAPPDATA%\WSGM\gyro.csv`. It retains one
+`gyro.previous.csv` rotation; each file is capped at 16 MiB. The ordinary WSGM log receives only the
+start path or a writer failure, never the per-report data.
 
 ## Hardware knowledge is observed, not documented
 
