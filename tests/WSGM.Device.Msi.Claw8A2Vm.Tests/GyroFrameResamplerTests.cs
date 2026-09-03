@@ -82,4 +82,16 @@ public sealed class GyroFrameResamplerTests
 
         Assert.Equal(45f, repeat.X, 3);
     }
+
+    [Fact]
+    public void ResetDropsMotionFromThePreviousDeviceCycle()
+    {
+        GyroFrameResampler resampler = new();
+        resampler.OnReading(new Vector3(45f, 0f, 0f), T0);
+        resampler.FrameAverage(T0.AddMilliseconds(8));
+
+        resampler.Reset();
+
+        Assert.Equal(Vector3.Zero, resampler.FrameAverage(T0.AddSeconds(1)));
+    }
 }

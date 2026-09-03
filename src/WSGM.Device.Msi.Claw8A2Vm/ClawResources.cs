@@ -482,13 +482,12 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
 
     /// <summary>How long a sensor reading may still be attached to a controller sample.</summary>
     /// <remarks>
-    /// The gyrometer reports at tens of hertz while the controller reader runs at about 125 Hz, so
-    /// the same reading legitimately rides several samples. What is not legitimate is replaying it
-    /// after the sensor stopped: a last non-zero angular velocity attached to every following
-    /// sample produces continuous gyro movement on a device that is lying still. A quarter of a
-    /// second is several sensor periods and far short of anything a player would notice.
+    /// The physical gyrometer is configured for a 10 ms report interval while the controller reader
+    /// runs at about 125 Hz, so the same reading legitimately rides an adjacent frame. Five sensor
+    /// periods cover ordinary scheduler jitter without replaying a non-zero value after the device
+    /// or its Intel transport stops producing fresh hardware reports.
     /// </remarks>
-    internal static readonly TimeSpan MaximumMotionAge = TimeSpan.FromMilliseconds(250);
+    internal static readonly TimeSpan MaximumMotionAge = TimeSpan.FromMilliseconds(50);
 
     private readonly GyroFrameResampler _resampler = new();
 
@@ -522,11 +521,9 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
         if (now - stamp > MaximumMotionAge)
         {
             // Once per quiet stretch, never per sample: this is called from the controller reader
-            // at about 125 Hz. A quiet gyrometer is a still device (the ISH suppresses unchanged
-            // readings); the resampled average below decays to zero on its own while the last
-            // measured acceleration keeps Steam's fusion anchored, so nothing is dropped here —
-            // publishing nothing turned every pause into freefall and made the crosshair jump when
-            // the player stopped moving (device-observed 2026-09-02).
+            // at about 125 Hz. The resampled average below decays to zero while the last measured
+            // acceleration keeps Steam's fusion anchored, so an Intel transport pause cannot turn
+            // into either continuous rotation or freefall.
             if (Interlocked.Exchange(ref _staleReported, 1) == 0)
             {
                 PluginTrace.Info(
@@ -549,6 +546,9 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
         ClawCycleContext context,
         CancellationToken cancellationToken)
     {
+        Volatile.Write(ref _latest, null);
+        Interlocked.Exchange(ref _staleReported, 0);
+        _resampler.Reset();
         bool started = await _source.StartAsync(
             sample =>
             {
@@ -573,7 +573,7 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
             ? Set(ClawServiceState.Owned)
             : Set(ClawServiceState.Passive, new CapabilityReason(
                 CapabilityReasonCode.PrerequisiteMissing,
-                "The Intel ISS gyrometer or legacy physical accelerometer was unavailable; no synthetic fallback exists."));
+                "The Intel ISS physical gyrometer or accelerometer was unavailable; no synthetic fallback exists."));
     }
 
     public async ValueTask<ClawServiceResult> SuspendAsync(
@@ -582,6 +582,7 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
     {
         await _source.StopAsync(cancellationToken).ConfigureAwait(false);
         Volatile.Write(ref _latest, null);
+        _resampler.Reset();
         return Set(ClawServiceState.Idle);
     }
 
@@ -595,6 +596,7 @@ internal sealed class MotionService(IClawMotionSource source) : ClawServiceStatu
     {
         await _source.StopAsync(cancellationToken).ConfigureAwait(false);
         Volatile.Write(ref _latest, null);
+        _resampler.Reset();
         return Set(ClawServiceState.Idle);
     }
 }
@@ -620,6 +622,20 @@ internal sealed class GyroFrameResampler
     private Vector3 _pendingDegrees;
     private DateTimeOffset? _lastFrame;
     private Vector3 _lastAverage;
+
+    /// <summary>Clears all integration state at a device-cycle boundary.</summary>
+    public void Reset()
+    {
+        lock (_gate)
+        {
+            _omega = default;
+            _quietCap = default;
+            _accountedTo = null;
+            _pendingDegrees = default;
+            _lastFrame = null;
+            _lastAverage = default;
+        }
+    }
 
     /// <summary>Feeds one sensor reading, accumulating the angle the previous one covered.</summary>
     /// <param name="omegaDegreesPerSecond">Angular velocity in the published basis.</param>
@@ -1170,9 +1186,9 @@ internal sealed class ControllerService(
         }
 
         _rearButtons = current;
-        // Aged rather than taken blindly. If the WinRT gyrometer stops raising ReadingChanged while
-        // the controller keeps reporting, the last reading would otherwise ride every following
-        // sample and replay a non-zero angular velocity through the virtual Deck indefinitely.
+        // Aged rather than taken blindly. If the physical sensor counter stops advancing while the
+        // controller keeps reporting, the last reading must not replay a non-zero angular velocity
+        // through the virtual Deck indefinitely.
         await _host.PublishControllerSampleAsync(
             sample with { Motion = _motion.Current(sample.Timestamp) },
             cancellationToken).ConfigureAwait(false);

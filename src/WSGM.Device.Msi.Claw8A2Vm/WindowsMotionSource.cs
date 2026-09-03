@@ -1,10 +1,8 @@
 using System;
-using System.Diagnostics;
 using System.Numerics;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
-using Windows.Devices.Sensors;
 using WSGM.Device.Sdk.Input;
 using WSGM.Device.Sdk.Plugin;
 
@@ -13,17 +11,17 @@ namespace WSGM.Device.Msi.Claw8A2Vm;
 internal sealed class WindowsClawMotionSource : IClawMotionSource
 {
     private readonly object _gate = new();
-    private Gyrometer? _gyrometer;
-    private LegacyCustomAccelerometer? _accelerometer;
+    private LegacyPhysicalMotionSensors? _sensors;
     private Channel<MotionSample>? _samples;
-    private CancellationTokenSource? _pumpCancellation;
+    private CancellationTokenSource? _cancellation;
+    private Task? _producer;
     private Task? _pump;
-    private Vector3 _latestRawAcceleration;
-    private long _latestAccelerationTick;
-    private int _accelerometerReadFailed;
 
-    /// <summary>How long one measured value may bridge a transient COM read failure.</summary>
-    internal static readonly TimeSpan MaximumAccelerometerAge = TimeSpan.FromMilliseconds(250);
+    /// <summary>
+    /// Poll faster than the physical sensor's 10 ms minimum report interval so scheduler jitter
+    /// cannot routinely skip a hardware report. The counter prevents duplicate publication.
+    /// </summary>
+    internal static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(2);
 
     public ValueTask<bool> StartAsync(
         Func<MotionSample, ValueTask> publish,
@@ -33,187 +31,115 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
-            if (_gyrometer is not null)
+            if (_sensors is not null)
             {
                 return ValueTask.FromResult(true);
             }
 
-            Gyrometer? gyrometer = Gyrometer.GetDefault();
-            if (gyrometer is null
-                || !gyrometer.DeviceId.Contains("VID_8087&PID_0AC2", StringComparison.OrdinalIgnoreCase))
+            LegacyPhysicalMotionSensors? sensors = LegacyPhysicalMotionSensors.TryOpen();
+            if (sensors is null)
             {
                 return ValueTask.FromResult(false);
             }
 
-            Vector3 acceleration = default;
-            string? error = null;
-            LegacyCustomAccelerometer? accelerometer = LegacyCustomAccelerometer.TryOpen();
-            if (accelerometer is null
-                || !accelerometer.TryRead(out acceleration, out error))
-            {
-                PluginTrace.Warn(
-                    "motion",
-                    $"The Intel ISS gyrometer is present, but its physical accelerometer is unavailable: {error ?? "not found"}.");
-                accelerometer?.Dispose();
-                return ValueTask.FromResult(false);
-            }
-
-            try
-            {
-                uint requested = Math.Max(gyrometer.MinimumReportInterval, 10u);
-                gyrometer.ReportInterval = requested;
-            }
-            catch (Exception ex) when (ex is not OutOfMemoryException)
-            {
-                accelerometer.Dispose();
-                PluginTrace.Failure("motion", "The Intel ISS gyrometer could not be configured", ex);
-                return ValueTask.FromResult(false);
-            }
-
-            _accelerometer = accelerometer;
-            _latestRawAcceleration = acceleration;
-            _latestAccelerationTick = Stopwatch.GetTimestamp();
-            _accelerometerReadFailed = 0;
-            _samples = Channel.CreateBounded<MotionSample>(new BoundedChannelOptions(8)
+            Channel<MotionSample> samples = Channel.CreateBounded<MotionSample>(new BoundedChannelOptions(8)
             {
                 FullMode = BoundedChannelFullMode.DropOldest,
                 SingleReader = true,
                 SingleWriter = true,
             });
-            _pumpCancellation = new CancellationTokenSource();
-            _gyrometer = gyrometer;
-            _gyrometer.ReadingChanged += OnReadingChanged;
-            _pump = PumpAsync(_samples.Reader, publish, _pumpCancellation.Token);
+            CancellationTokenSource sourceCancellation = new();
+            _sensors = sensors;
+            _samples = samples;
+            _cancellation = sourceCancellation;
+            _producer = Task.Run(
+                () => ProduceAsync(sensors, samples.Writer, sourceCancellation.Token),
+                CancellationToken.None);
+            _pump = PumpAsync(samples.Reader, publish, sourceCancellation.Token);
             return ValueTask.FromResult(true);
         }
     }
 
     public async ValueTask StopAsync(CancellationToken cancellationToken)
     {
+        LegacyPhysicalMotionSensors? sensors;
+        CancellationTokenSource? sourceCancellation;
+        Task? producer;
         Task? pump;
-        LegacyCustomAccelerometer? accelerometer;
         lock (_gate)
         {
-            if (_gyrometer is null)
+            if (_sensors is null)
             {
                 return;
             }
 
-            _gyrometer.ReadingChanged -= OnReadingChanged;
-            _gyrometer.ReportInterval = 0;
-            _samples?.Writer.TryComplete();
-            _pumpCancellation?.Cancel();
+            sensors = _sensors;
+            sourceCancellation = _cancellation;
+            producer = _producer;
             pump = _pump;
-            accelerometer = _accelerometer;
-            _accelerometer = null;
+            _sensors = null;
+            sourceCancellation?.Cancel();
         }
 
-        accelerometer?.Dispose();
-
-        if (pump is not null)
+        try
         {
-            try
+            if (producer is not null)
             {
-                await pump.WaitAsync(cancellationToken).ConfigureAwait(false);
+                await producer.ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (_pumpCancellation?.IsCancellationRequested == true)
+
+            if (pump is not null)
             {
+                await pump.ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OutOfMemoryException)
-            {
-                // A failed publication or disappearing sensor is a resource-health event; teardown
-                // still must detach the WinRT subscription and dispose the bounded pump.
-            }
+        }
+        catch (OperationCanceledException) when (sourceCancellation?.IsCancellationRequested == true)
+        {
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            PluginTrace.Failure("motion", "Physical IMU teardown observed a failed worker", ex);
+        }
+        finally
+        {
+            sensors.Dispose();
+            sourceCancellation?.Dispose();
         }
 
         lock (_gate)
         {
-            _pumpCancellation?.Dispose();
-            _gyrometer = null;
-            _latestRawAcceleration = default;
-            _latestAccelerationTick = 0;
-            _accelerometerReadFailed = 0;
             _samples = null;
-            _pumpCancellation = null;
+            _cancellation = null;
+            _producer = null;
             _pump = null;
         }
+
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
-    public async ValueTask DisposeAsync() => await StopAsync(CancellationToken.None).ConfigureAwait(false);
+    public async ValueTask DisposeAsync() =>
+        await StopAsync(CancellationToken.None).ConfigureAwait(false);
 
-    private void OnReadingChanged(Gyrometer sender, GyrometerReadingChangedEventArgs args)
-    {
-        GyrometerReading reading = args.Reading;
-        LegacyCustomAccelerometer? accelerometer;
-        lock (_gate)
-        {
-            accelerometer = _accelerometer;
-        }
-
-        Vector3 acceleration = default;
-        string? error = null;
-        bool read = accelerometer?.TryRead(out acceleration, out error) is true;
-        if (read)
-        {
-            if (Interlocked.Exchange(ref _accelerometerReadFailed, 0) != 0)
-            {
-                PluginTrace.Info("motion", "Physical accelerometer readings resumed.");
-            }
-        }
-        else if (accelerometer is not null
-            && Interlocked.Exchange(ref _accelerometerReadFailed, 1) == 0)
-        {
-            PluginTrace.Warn(
-                "motion",
-                $"Physical accelerometer read failed; holding its last hardware sample for at most {MaximumAccelerometerAge.TotalMilliseconds:F0} ms: {error}");
-        }
-
-        Vector3? currentAcceleration;
-        ChannelWriter<MotionSample>? writer;
-        lock (_gate)
-        {
-            if (!ReferenceEquals(accelerometer, _accelerometer))
-            {
-                return;
-            }
-
-            if (read)
-            {
-                _latestRawAcceleration = acceleration;
-                _latestAccelerationTick = Stopwatch.GetTimestamp();
-            }
-
-            currentAcceleration = _latestAccelerationTick != 0
-                && Stopwatch.GetElapsedTime(_latestAccelerationTick) <= MaximumAccelerometerAge
-                    ? _latestRawAcceleration
-                    : null;
-            writer = _samples?.Writer;
-        }
-
-        writer?.TryWrite(CreateSample(
-            (float)reading.AngularVelocityX,
-            (float)reading.AngularVelocityY,
-            (float)reading.AngularVelocityZ,
-            reading.Timestamp,
-            currentAcceleration));
-    }
-
-    /// <summary>Builds one canonical motion sample from the two Windows sensor projections.</summary>
+    /// <summary>Builds one canonical sample from physical LSM6DSO sensor-space vectors.</summary>
+    /// <remarks>
+    /// Both physical collections share the same die axes. Steam Deck packets carry those raw axes,
+    /// while Steam and SDL expose them to applications as X, Z, -Y. This is the only conversion in
+    /// the plugin; the Neptune encoder applies the inverse when it writes the raw packet slots.
+    /// </remarks>
     internal static MotionSample CreateSample(
-        float gyroX,
-        float gyroY,
-        float gyroZ,
+        Vector3 rawAngularVelocity,
         DateTimeOffset timestamp,
         Vector3? rawAcceleration)
     {
+        Vector3 gyro = ToApplicationBasis(rawAngularVelocity);
         Vector3 acceleration = rawAcceleration is { } raw
-            ? new Vector3(raw.X, raw.Z, -raw.Y)
+            ? ToApplicationBasis(raw)
             : default;
         return new MotionSample
         {
-            GyroX = gyroX,
-            GyroY = gyroY,
-            GyroZ = -gyroZ,
+            GyroX = gyro.X,
+            GyroY = gyro.Y,
+            GyroZ = gyro.Z,
             HasGyro = true,
             AccelX = acceleration.X,
             AccelY = acceleration.Y,
@@ -221,6 +147,68 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
             HasAccelerometer = rawAcceleration.HasValue,
             SensorTimestamp = timestamp,
         };
+    }
+
+    private static Vector3 ToApplicationBasis(Vector3 raw) =>
+        new(raw.X, raw.Z, -raw.Y);
+
+    private static async Task ProduceAsync(
+        LegacyPhysicalMotionSensors sensors,
+        ChannelWriter<MotionSample> writer,
+        CancellationToken cancellationToken)
+    {
+        StationaryGyroBiasCalibrator bias = new();
+        uint? lastCounter = null;
+        bool readFailed = false;
+        bool calibrationReported = false;
+        try
+        {
+            using PeriodicTimer timer = new(PollInterval);
+            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (!sensors.TryRead(out PhysicalMotionReading reading, out string? error))
+                {
+                    if (!readFailed)
+                    {
+                        readFailed = true;
+                        PluginTrace.Warn("motion", $"Physical IMU read failed: {error}");
+                    }
+
+                    continue;
+                }
+
+                if (readFailed)
+                {
+                    readFailed = false;
+                    PluginTrace.Info("motion", "Physical IMU readings resumed.");
+                }
+
+                if (lastCounter == reading.HardwareCounter)
+                {
+                    continue;
+                }
+
+                lastCounter = reading.HardwareCounter;
+                Vector3 corrected = bias.Correct(reading.AngularVelocity, reading.Acceleration);
+                if (!calibrationReported && bias.Bias is { } calibrated)
+                {
+                    calibrationReported = true;
+                    PluginTrace.Info(
+                        "motion",
+                        $"Physical gyroscope stationary bias calibrated to "
+                        + $"({calibrated.X:F3}, {calibrated.Y:F3}, {calibrated.Z:F3}) degrees/second.");
+                }
+
+                writer.TryWrite(CreateSample(corrected, reading.Timestamp, reading.Acceleration));
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            writer.TryComplete();
+        }
     }
 
     private static async Task PumpAsync(
@@ -232,5 +220,93 @@ internal sealed class WindowsClawMotionSource : IClawMotionSource
         {
             await publish(sample).ConfigureAwait(false);
         }
+    }
+}
+
+/// <summary>Removes the stationary zero-rate offset without learning normal aiming motion.</summary>
+internal sealed class StationaryGyroBiasCalibrator
+{
+    internal const int RequiredSampleCount = 32;
+    internal const float MaximumCandidateMagnitude = 1.5f;
+    internal const float MaximumCandidateAxisSpan = 0.35f;
+    internal const float MinimumGravityMagnitude = 0.85f;
+    internal const float MaximumGravityMagnitude = 1.15f;
+    internal const float RestDeadband = 0.15f;
+
+    private int _candidateCount;
+    private Vector3 _candidateSum;
+    private Vector3 _candidateMinimum;
+    private Vector3 _candidateMaximum;
+
+    /// <summary>The zero-rate offset fixed for the current device cycle.</summary>
+    public Vector3? Bias { get; private set; }
+
+    /// <summary>Returns bias-corrected physical angular velocity in degrees per second.</summary>
+    public Vector3 Correct(Vector3 angularVelocity, Vector3 acceleration)
+    {
+        if (Bias is { } bias)
+        {
+            return ApplyRestDeadband(angularVelocity - bias);
+        }
+
+        float gravity = acceleration.Length();
+        if (!float.IsFinite(gravity)
+            || gravity < MinimumGravityMagnitude
+            || gravity > MaximumGravityMagnitude
+            || angularVelocity.LengthSquared() > MaximumCandidateMagnitude * MaximumCandidateMagnitude)
+        {
+            ResetCandidate();
+            return angularVelocity;
+        }
+
+        AddCandidate(angularVelocity);
+        Vector3 span = _candidateMaximum - _candidateMinimum;
+        if (span.X > MaximumCandidateAxisSpan
+            || span.Y > MaximumCandidateAxisSpan
+            || span.Z > MaximumCandidateAxisSpan)
+        {
+            ResetCandidate();
+            AddCandidate(angularVelocity);
+        }
+
+        if (_candidateCount < RequiredSampleCount)
+        {
+            // A low, stable startup value is indistinguishable from zero-rate bias. Holding rest
+            // during this short window prevents the offset itself from moving Steam's cursor.
+            return Vector3.Zero;
+        }
+
+        Bias = _candidateSum / _candidateCount;
+        return ApplyRestDeadband(angularVelocity - Bias.Value);
+    }
+
+    private static Vector3 ApplyRestDeadband(Vector3 corrected) =>
+        corrected.LengthSquared() <= RestDeadband * RestDeadband
+            ? Vector3.Zero
+            : corrected;
+
+    private void AddCandidate(Vector3 value)
+    {
+        if (_candidateCount == 0)
+        {
+            _candidateMinimum = value;
+            _candidateMaximum = value;
+        }
+        else
+        {
+            _candidateMinimum = Vector3.Min(_candidateMinimum, value);
+            _candidateMaximum = Vector3.Max(_candidateMaximum, value);
+        }
+
+        _candidateCount++;
+        _candidateSum += value;
+    }
+
+    private void ResetCandidate()
+    {
+        _candidateCount = 0;
+        _candidateSum = default;
+        _candidateMinimum = default;
+        _candidateMaximum = default;
     }
 }
