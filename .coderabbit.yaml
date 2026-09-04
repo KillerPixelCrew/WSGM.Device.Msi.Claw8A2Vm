@@ -1,0 +1,110 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+tone_instructions: >-
+  Be concise and evidence-first. Report only actionable defects with a concrete trigger, impact,
+  and smallest safe correction; omit praise, style nitpicks, and generic security advice.
+
+reviews:
+  profile: chill
+  request_changes_workflow: true
+  high_level_summary: true
+  review_status: true
+  changed_files_summary: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  in_progress_fortune: false
+  poem: false
+  enable_prompt_for_ai_agents: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!**/bin/**"
+    - "!**/obj/**"
+    - "!publish/**"
+    - "!**/TestResults/**"
+    - "!**/*.wsgmpkg"
+    - "src/WSGM.Device.Msi.Claw8A2Vm/glyphs/**"
+  path_instructions:
+    - path: "src/WSGM.Device.Msi.Claw8A2Vm/**"
+      instructions: |
+        This plugin targets only the measured MSI Claw 8 AI+ A2VM. Detection must remain
+        side-effect free and require the exact normalized SMBIOS manufacturer, MS-1T52 board, and
+        1T52.1 SKU; firmware and USB identities are separate service gates, not substitutes for
+        machine identity. Start and every mutation must revalidate live identity, firmware, service,
+        generation, deadline, range, and current state. Preserve independent service degradation,
+        whole-set publication, bounded idempotent cleanup, and truthful uncertain-write or restore
+        results. Do not infer hardware support from software-only CI.
+    - path: "src/WSGM.Device.Msi.Claw8A2Vm/{ClawCapabilities.cs,ClawHardware.cs,ClawRecoveryJournal.cs,MsiWmiPlatform.cs,WindowsHidTransports.cs}"
+      instructions: |
+        Treat hardware protocols as measured allowlists. WMI transport must admit only Get_/Set_
+        names while call sites stay restricted to measured methods, serialized access, exact
+        32-byte payloads, and bounded timeouts. Preserve unknown bytes only in stateful fan and
+        lighting read-modify-write formats; power and charge use zero-filled envelopes. Enforce
+        range/order rules, original-state capture before temporary mutations, atomic journal
+        publication, exact readback, rollback, same-firmware restoration, and retained failed entries.
+    - path: "src/WSGM.Device.Msi.Claw8A2Vm/{ClawInput.cs,WindowsMotionSource.cs,LegacyPhysicalMotionSensors.cs}"
+      instructions: |
+        Preserve the measured DirectInput mapping: byte 7 bit 4 is left/M1 and bit 3 is right/M2,
+        with separate assertions. Keep chord suppression narrowly fail-open and the hook callback
+        bounded, allocation-light, and free of I/O or logging. Bind only measured legacy sensor
+        identities and fields, reject duplicate counters, apply (raw X, raw Z, -raw Y) exactly once,
+        and preserve the evidence-derived gyro-bias, freshness, resampling, and reset behavior.
+    - path: "src/WSGM.Device.Msi.Claw8A2Vm/ArcSyncTransport.cs"
+      instructions: |
+        Preserve capability probing, dynamic loading of the user's System32 Intel control library,
+        and the tested IGCL ABI sizes. Do not add or redistribute Intel binaries. Capture the exact
+        original display profile on acquire and verify restoration during make-safe.
+    - path: "src/WSGM.Device.Msi.Claw8A2Vm/glyphs/**"
+      instructions: |
+        Treat the glyph profile as byte-locked evidence. Every artwork change must update the exact
+        lowercase SHA-256, byte count, source revision, mapping, and notice as applicable. Do not
+        normalize, regenerate, or silently replace authored SVG or PNG bytes; all referenced assets
+        must remain packaged.
+    - path: "src/WSGM.Device.Msi.Claw8A2Vm/plugin.wsgm.json"
+      instructions: |
+        Keep package ID, entry assembly, version, apiVersion, and exact-device declarations aligned
+        with the project, SDK contract, pack script, tests, README, and release workflow.
+    - path: "src/WSGM.Device.Msi.Claw8A2Vm/PROVENANCE.md"
+      instructions: |
+        Require explicit attended Device Lab evidence for claims about real WMI, HID, Sensor API,
+        controller re-enumeration, power, fan, lighting, or display behavior. Keep the tested hardware,
+        firmware, endpoint, and evidence descriptions precise; software-only tests cannot establish
+        new hardware facts.
+    - path: "tests/**"
+      instructions: |
+        Require hardware-free regression tests with fake transports for every changed identity gate,
+        protocol byte, timeout, rollback, journal rule, input mapping, axis transform, gyro behavior,
+        ABI layout, manifest, and packaging invariant. M1 and M2 mappings must be asserted separately.
+    - path: "eng/**"
+      instructions: |
+        Preserve marked-output ownership checks, assemble-then-static-validate-then-pack ordering,
+        deterministic package bytes, exact glyph copying, manifest-authoritative name/version/entry,
+        managed x64 framework-dependent output, and validation by the commit-pinned Device Lab.
+    - path: ".github/workflows/**"
+      instructions: |
+        Require recursive submodule checkout, Windows .NET 10 Release build/tests, software-only CI,
+        package validation, least-privilege permissions, and tag/manifest/artifact/hash consistency.
+        Never add unattended hardware access.
+    - path: ".gitmodules"
+      instructions: |
+        Treat SDK and Device Lab as commit-pinned source/tooling dependencies. Flag floating refs,
+        unexpected URLs, or changes that break recursive reproducibility.
+    - path: "external/**"
+      instructions: |
+        Review each gitlink update deliberately. The direct SDK pin must equal Device Lab's nested SDK
+        pin, and code, manifest apiVersion, pack validation, tests, and docs must target that exact
+        contract. Do not replace the pins with floating branches or package references.
+    - path: "README.md"
+      instructions: |
+        Keep the exact-device boundary, source layout, provenance limitations, recursive clone,
+        hardware-free validation commands, packaging flow, and redistribution claims aligned with
+        code and checked-in evidence.
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
