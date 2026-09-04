@@ -1,52 +1,116 @@
-# WSGM.Device.Msi.Claw8A2Vm
+# MSI Claw 8 AI+ A2VM plugin contributor instructions
 
-The first-party MSI Claw 8 AI+ A2VM plugin, board `MS-1T52`. Read
-`_plan\claw-8-a2vm-plugin.md` before changing anything here — findings marked `[HW 2026-08-27]` were
-captured on the reference unit and supersede any claim inherited from Handheld Companion, HHD, the
-Linux `hid-msi` series, or ClawTweaks.
+## Scope and sources of truth
 
-The rules in `plugins\AGENTS.md` apply in full. What follows is specific to this device.
+These instructions apply to `src/WSGM.Device.Msi.Claw8A2Vm/**`.
 
-## This package owns the keyboard suppressor
+This repository is the MIT-licensed reference plugin for the MSI Claw 8 AI+ A2VM only. Read the root
+`README.md`, `PROVENANCE.md`, the relevant tests, and the current implementation before changing
+behavior. `PROVENANCE.md` records the revision plus current IGCL and motion evidence; implementation
+comments and tests capture other measured facts and safety boundaries. Do not generalize measured
+behavior to another Claw model or firmware without new attended evidence.
 
-`FirmwareChordSuppressor` — the `WH_KEYBOARD_LL` state machine that neutralizes the firmware's
-`Win+G` and `Win+Tab` chords — **lives here, not in `src\WSGM\Input\`.** It is exact-device policy
-for one board's firmware behavior, not general WSGM input handling, and `src\WSGM\Input\AGENTS.md`
-carries the matching prohibition.
+## Build, pins, and packaging
 
-Its discriminator is the **orphan key-up**: the firmware delivers `G`/`Tab` as a key-UP with no
-preceding key-DOWN, which a physical keyboard cannot produce. That makes the rule sound rather than
-heuristic, so a real keyboard's `Win+G` passes through untouched and nothing is blocked globally.
-Consequences that are easy to undo by accident:
+From the repository root:
 
-- Suppress only an orphan key-up, only for `G` and `Tab`, only while a Windows key is held, and only
-  with no other modifier down — `Ctrl+Win+G` must survive.
-- Volume keys arrive from the **same** `ACPI\MSNB1001` device as the chords, and they are ordinary
-  well-formed presses. A shape-based rule passes them automatically; never add a device-based rule,
-  and never disable `i8042prt` or the ACPI keyboard device.
-- If a future BIOS emits a well-formed chord, the signature stops matching and the suppressor **fails
-  open**. It must never fall back to blocking `Win+G` globally.
-- The hook is suppression-only. `KBDLLHOOKSTRUCT` cannot identify the source keyboard, so the logical
-  OEM control is published from the MSI WMI event (`0x29` OEM1, `0x58` OEM2 short, `0x2A` OEM2 long),
-  never from the hook.
-- The callback does the state transition, at most one `SendInput` batch, and a bounded-queue write.
-  No pipe, WMI, HID, UI, allocation-heavy work, or synchronous logging, ever.
+```powershell
+dotnet build WSGM.Device.Msi.Claw8A2Vm.slnx --configuration Release
+dotnet test WSGM.Device.Msi.Claw8A2Vm.slnx --configuration Release --no-build
+```
 
-## Device facts that are easy to get wrong
+The plugin targets `net10.0-windows10.0.19041.0` and x64. `plugin.wsgm.json` is authoritative for
+package ID, plugin version, API version, entry assembly, and entry type; a release tag must match
+it. When package verification is requested, run `./eng/pack.ps1`; it performs the
+framework-dependent publish, glyph staging, offline Device Lab validation, and deterministic package
+creation. Do not tag, publish, or release unless explicitly asked.
 
-- **Board and system product are different SMBIOS fields.** `MS-1T52` is `Win32_BaseBoard.Product`;
-  `Win32_ComputerSystem.Model` is the marketing string. A matcher reading "SMBIOS product" as Type 1
-  never matches this unit. `MS-1T42` (7-inch A2VM) and `MS-1T41` (A1M) need separate descriptors, and
-  the A1M's larger power limits must never leak into this one.
-- **EC firmware comes from `Get_EC`, not SMBIOS** — `Win32_BIOS.EmbeddedControllerMajor/MinorVersion`
-  both return `255`.
-- **Container ID is unusable** (null GUID on every relevant device) and the USB serial exists only in
-  XInput mode. Key hotplug and mode-switch continuation on `DEVPKEY_Device_LocationPaths`, or parent
-  hub plus address — verified byte-identical across a full switch-and-restore cycle.
-- **HC has M1 and M2 inverted.** Measured here, DirectInput index 15 is the RIGHT paddle (M2) and 16
-  is the LEFT (M1). Copying HC's indices mirrors every user's rear-paddle assignment.
-- **RGB writes are persistent across reboot with no `SyncToROM`, and no volatile path exists.**
-  Coalescing is mandatory; never write per lighting frame, and never write profile memory on every
-  launch.
-- MSI WMI requires elevation; `MSI_Event` does not. The OEM event path and the suppressor therefore
-  work regardless of the host's privilege.
+`external/WSGM.Device.Sdk` and `external/WSGM.DeviceLab` are pinned source dependencies. Inspect
+`git submodule status --recursive` first, and initialize or synchronize only to intended recorded
+commits when no local submodule work would be overwritten. Advance them deliberately and
+recursively; the direct SDK pin must equal Device Lab's nested SDK pin. Never copy their source into
+this project or edit files inside a submodule as if they belonged here.
+
+## Exact device boundary
+
+Match the machine only by the measured SMBIOS identity in `ClawHardwareFacts`: manufacturer
+`MICRO-STAR INTERNATIONAL CO., LTD.`, board `MS-1T52`, and SKU `1T52.1`. Package ID
+`wsgm.device.msi.claw-8-a2vm` and definition ID `ms-1t52` identify software records, not the
+machine. Treat EC firmware prefix `1T52EMS1.109`, MCU revision `0229`, and MSI USB VID `0DB0` with
+the supported PIDs as separate service/capability gates.
+
+Detection must remain side-effect free. `StartAsync` and every mutation must revalidate live
+identity, firmware, service availability, generation, deadline, range, and current state before
+access. Install `PluginTrace` before the first hardware read. Report truthful outcomes; never
+convert an uncertain write or restore into success.
+
+## Lifecycle and service behavior
+
+- Serialize commands with observation so reads cannot race writes. Preserve whole-set publication
+  and generation semantics.
+- Keep periodic observation inside the host freshness window. A service read failure may degrade
+  that service but must not kill the observation loop or unrelated services.
+- Retract physical/OEM/descriptors if startup cannot establish the supported device. Treat OEM,
+  power/charge/fans/telemetry, lighting, motion, controller, chord suppression, and optional display
+  as independently degradable.
+- Trace transitions, decisions, and keyed state changes only. Do not log every HID or motion report;
+  cancellation is diagnostic, not an error.
+- Stop and disposal must be bounded, idempotent, and honest about incomplete cleanup.
+
+## Mutation invariants
+
+All hardware protocols are bounded and allowlisted at their call sites. WMI calls are serialized,
+the transport admits only `Get_*`/`Set_*` names, and callers must remain limited to the measured
+methods with exact 32-byte payloads and the established timeout. Preserve unknown bytes and flags in
+stateful read-modify-write formats such as fan and lighting payloads; power and charge deliberately
+use zero-filled command envelopes.
+
+- Power: keep PL1/PL2 within 8-37 W and PL1 <= PL2. Use ordered writes, exact readback, and rollback
+  of the original pair.
+- Charge: 60-100 percent is a persistent user setting. Verify it and roll back failed/cancelled
+  changes; do not restore a successful choice on normal stop.
+- Fans: one six-point semantic curve applies atomically to both channels under one snapshot. Verify
+  both readbacks and restore both originals on failure.
+- Lighting: treat the 32-byte MCU profile as persistent state. Preserve unknown bytes, replicate the
+  three logical zones as measured, keep the write-rate limit, verify the full profile, and exactly
+  roll back failure or cancellation. Do not revert a successful user choice on normal stop.
+- Controller mode: stop source/output first; journal the original mode; switch, wait for
+  re-enumeration, and identify the same physical device through `DEVPKEY_Device_LocationPaths`.
+  Restore and verify the original mode during cleanup. Never report an unverified device as
+  restored.
+- Power, fans, and controller mode are temporary. Capture the first original value in
+  `temporary-state.v1.json` before mutation, publish the bounded journal atomically, restore only on
+  the same supported firmware, retain failed entries for retry, and block unsafe mismatches.
+- Optional VRR/display support remains capability-probed and cycle-scoped. Load the user's Intel
+  control library dynamically; do not ship Intel binaries. Preserve tested IGCL ABI sizes, capture
+  the original profile on acquire, and restore that exact profile during make-safe.
+
+## Input and motion invariants
+
+- Preserve the measured DirectInput report layout: byte 7 bit 4 is left/M1 and bit 3 is right/M2.
+  Assert the two bits separately so a swapped mapping cannot pass. Preserve OEM key codes and the
+  120 ms latch used for reports without release events.
+- Chord suppression belongs in this plugin. Suppress only the measured non-injected orphan `G`/`Tab`
+  key-up while Win is down and Ctrl/Alt/Shift are not. Fail open otherwise and synthesize a Win
+  release only when required. The hook callback must remain bounded, allocation-light, and free of
+  I/O and logging.
+- Bind only the measured legacy Sensor API accelerometer/gyrometer identities and fields. Read
+  accelerometer before gyrometer, reject duplicate counters, and keep the bounded drop-oldest
+  channel.
+- Apply the axis transform `(raw X, raw Z, -raw Y)` exactly once.
+- Preserve the measurement-derived stationary gyro bias behavior: approximately 200-report windows,
+  subtraction without deadband, rest gates, and agreement across three separated windows before
+  distant-bias reacquisition. Preserve resampling and reset semantics; do not clamp away a valid
+  distant correction.
+
+## Glyphs, tests, and evidence
+
+The glyph profile is a byte-locked evidence manifest. When artwork changes, update the corresponding
+SHA-256, byte length, source revision, and notice; do not silently normalize or replace authored
+bytes. Keep all manifest assets packaged.
+
+CI is software-only. Any claim about WMI, HID, Sensor API, controller re-enumeration, fan/lighting
+payloads, power behavior, or display behavior requires an explicit attended Device Lab run on the
+reference unit and a provenance update. Add focused regression tests for each changed identity gate,
+protocol byte, timeout, rollback, journal, mapping, transform, calibration, ABI, and package
+invariant. Preserve repository `.editorconfig` conventions.
