@@ -28,7 +28,6 @@ reviews:
     - "!publish/**"
     - "!**/TestResults/**"
     - "!**/*.wsgmpkg"
-    - "src/WSGM.Device.Msi.Claw8A2Vm/glyphs/**"
   path_instructions:
     - path: "src/WSGM.Device.Msi.Claw8A2Vm/**"
       instructions: |
