@@ -4,6 +4,12 @@ The device plugin that teaches [WSGM](https://github.com/KillerPixelCrew/WSGM) a
 A2VM: power and charge limits, fan behaviour, lighting, the controller and its motion sensors, the
 OEM buttons, variable refresh, and the physical glyphs shown in Steam.
 
+The plugin also declares three power-profile shortcuts for WSGM's Device page and Steam QAM:
+Super Battery (8/9 W, Better Battery), Balanced (17/18 W, balanced Windows mode), and Extreme
+Performance (30/31 W, Best Performance). The watt pair is PL1/PL2. WSGM applies the power limits
+and Windows mode, then derives Custom whenever the observed values no longer match. Presets do
+not change CPU boost, Intel Endurance Gaming, fan settings, or the Windows power plan.
+
 It is also **the reference implementation of the
 [WSGM Device SDK](https://github.com/KillerPixelCrew/WSGM.Device.Sdk)** — the plugin to read, and
 copy from, when writing one for another handheld. That is why it is MIT: a reference nobody may copy

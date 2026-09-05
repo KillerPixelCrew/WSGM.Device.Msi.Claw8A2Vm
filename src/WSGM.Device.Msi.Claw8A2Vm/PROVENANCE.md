@@ -2,6 +2,15 @@
 
 Source revision: `HW-2026-09-03`
 
+Power-preset data was checked on 2026-09-05 against HandheldCompanion commit
+`5c94abca83f8711ff5620906871b31a41c76bf05`: `Devices/MSI/ClawA2VM.cs` supplies the
+8/8/9, 17/17/18 and 30/30/31 W overrides; `ClawA1M.cs` and `Properties/Resources.resx`
+supply the names and Windows modes. WSGM's sustained/slow pair maps these to PL1/PL2
+8/9, 17/18 and 30/31 W. Only those numeric settings and names are carried over, with an
+independent implementation through the SDK. HC's CPU boost and Intel Endurance settings are
+outside this shortcut. This is source evidence and fake-transport validation, not a new attended
+hardware measurement. Existing power transport limits and rollback behavior are unchanged.
+
 The package is first-party code licensed under the MIT License. It is the reference implementation
 of the WSGM Device SDK — the plugin other device plugins are expected to be read against and copied
 from — which is why it is permissive rather than carrying WSGM's own GPL-3.0-or-later. A plugin
