@@ -86,13 +86,23 @@ such a clamp allows, so the wrong offset would outlive the entire device cycle.
 
 The right OEM button also emits a malformed Windows-key chord: an orphan `G UP` for a short
 press, or `Tab UP` for a long press. The plugin suppresses those measured sequences while its
-OEM service is active, including on the Windows desktop. Normal keyboard Win+G and Win+Tab,
-Ctrl/Alt/Shift-modified chords, injected input, volume keys and unknown sequences pass through.
+OEM service is active, including on the Windows desktop. It also intercepts Win+G on key-down,
+as HC does, before Game Bar can activate. This includes ordinary keyboard Win+G, even with
+Ctrl/Alt/Shift held. Normal Win+Tab, modified orphan-up sequences, injected input, volume keys
+and unknown sequences pass through.
 
 The synthetic Win-key release uses the full 40-byte Windows x64 `INPUT` record. A keyboard-only
 union incorrectly reduced it to 32 bytes, so Windows rejected the release and the hook passed
 the firmware chord through. Layout and sequence tests cover the correction without installing a
 hook or sending input to the live desktop. No new device observation is claimed by those tests.
+
+The Win release also carries `KEYEVENTF_EXTENDEDKEY`, as in HC's
+`Helpers/FirmwareWorkarounds.cs` at revision `5c94abca83f8711ff5620906871b31a41c76bf05`.
+The earlier orphan-up-only matcher missed HC's key-down interception. The plugin now consumes
+the initial G down, repeats and G up, including when Win is released first. A failed synthetic
+release fails open without retrying on held-key repeats. The measured orphan-up handling remains
+for both G and Tab. These corrections have software tests; desktop suppression still needs an
+attended validation on the updated installed package.
 
 ## Hardware knowledge is observed, not documented
 

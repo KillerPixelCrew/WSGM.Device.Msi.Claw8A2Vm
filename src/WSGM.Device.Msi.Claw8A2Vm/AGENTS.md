@@ -96,13 +96,17 @@ use zero-filled command envelopes.
 - Preserve the measured DirectInput report layout: byte 7 bit 4 is left/M1 and bit 3 is right/M2.
   Assert the two bits separately so a swapped mapping cannot pass. Preserve OEM key codes and the
   120 ms latch used for reports without release events.
-- Chord suppression belongs in this plugin. Suppress only the measured non-injected orphan `G`/`Tab`
-  key-up while Win is down and Ctrl/Alt/Shift are not. Fail open otherwise and synthesize a Win
-  release only when required. The hook callback must remain bounded, allocation-light, and free of
-  I/O and logging.
+- Chord suppression belongs in this plugin. Intercept non-injected Win+G on key-down as HC does,
+  including ordinary keyboard Win+G with modifiers. Consume repeats and G up after an accepted
+  synthetic Win release, even if physical Win up arrives first. Do not retry a failed release on
+  repeats. Also suppress the measured orphan `G`/`Tab` key-up while Win is down and Ctrl/Alt/Shift
+  are not. Preserve normal Win+Tab and unknown input. The hook callback must remain bounded,
+  allocation-light, and free of I/O and logging.
 - Keep the x64 `INPUT` ABI at 40 bytes with its 32-byte union, including for keyboard-only
   injection. A smaller record makes `SendInput` reject the synthetic Win release and the hook
   pass the firmware chord through. Keep the layout and shortcut-preservation regression tests.
+- Synthetic left/right Win events must carry `KEYEVENTF_EXTENDEDKEY`; dummy-key events must not.
+  Source comparison and layout tests do not establish that desktop Game Bar suppression works.
 - Bind only the measured legacy Sensor API accelerometer/gyrometer identities and fields. Read
   accelerometer before gyrometer, reject duplicate counters, and keep the bounded drop-oldest
   channel.

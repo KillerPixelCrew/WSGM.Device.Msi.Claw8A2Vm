@@ -18,8 +18,19 @@ public sealed class FirmwareChordTests
         NativeKeyboard.Input release = NativeKeyboard.KeyInput(NativeKeyboard.VK_LWIN, keyUp: true, marker);
         Assert.Equal(NativeKeyboard.INPUT_KEYBOARD, release.Type);
         Assert.Equal(NativeKeyboard.VK_LWIN, (uint)release.Data.Keyboard.VirtualKey);
-        Assert.Equal(NativeKeyboard.KEYEVENTF_KEYUP, release.Data.Keyboard.Flags);
+        Assert.Equal(NativeKeyboard.KEYEVENTF_KEYUP | NativeKeyboard.KEYEVENTF_EXTENDEDKEY, release.Data.Keyboard.Flags);
         Assert.Equal((nuint)marker, release.Data.Keyboard.ExtraInfo);
+    }
+
+    [Theory]
+    [InlineData(NativeKeyboard.VK_LWIN, true, 3u)]
+    [InlineData(NativeKeyboard.VK_RWIN, true, 3u)]
+    [InlineData(NativeKeyboard.VK_LWIN, false, 1u)]
+    [InlineData(NativeKeyboard.VK_DUMMY, false, 0u)]
+    [InlineData(NativeKeyboard.VK_DUMMY, true, 2u)]
+    public void SyntheticInput_MarksWindowsKeysAsExtended(uint key, bool keyUp, uint flags)
+    {
+        Assert.Equal(flags, NativeKeyboard.KeyInput(key, keyUp, 0).Data.Keyboard.Flags);
     }
 
     [Theory]
@@ -43,7 +54,6 @@ public sealed class FirmwareChordTests
     }
 
     [Theory]
-    [InlineData(NativeKeyboard.VK_G)]
     [InlineData(NativeKeyboard.VK_TAB)]
     public void PhysicalChord_IncludingRepeatedKeyDowns_PassesThrough(uint target)
     {
@@ -53,6 +63,106 @@ public sealed class FirmwareChordTests
         Assert.Equal(default, state.Observe(target, keyDown: true, injected: false));
         Assert.Equal(default, state.Observe(target, keyDown: false, injected: false));
         Assert.Equal(default, state.Observe(NativeKeyboard.VK_LWIN, keyDown: false, injected: false));
+    }
+
+    [Theory]
+    [InlineData(NativeKeyboard.VK_LWIN, true)]
+    [InlineData(NativeKeyboard.VK_LWIN, false)]
+    [InlineData(NativeKeyboard.VK_RWIN, true)]
+    [InlineData(NativeKeyboard.VK_RWIN, false)]
+    public void WinG_BlocksDownRepeatsAndUpInEitherReleaseOrder(uint windowsKey, bool windowsUpFirst)
+    {
+        FirmwareChordStateMachine state = new();
+        _ = state.Observe(windowsKey, keyDown: true, injected: false);
+        ChordDecision down = state.Observe(NativeKeyboard.VK_G, keyDown: true, injected: false);
+        Assert.Equal(new ChordDecision(true, windowsKey == NativeKeyboard.VK_LWIN, windowsKey == NativeKeyboard.VK_RWIN), down);
+        state.CommitSyntheticReleases(down.ReleaseLeftWindows, down.ReleaseRightWindows);
+        Assert.Equal(new ChordDecision(true, false, false), state.Observe(NativeKeyboard.VK_G, keyDown: true, injected: false));
+        if (windowsUpFirst)
+        {
+            Assert.True(state.Observe(windowsKey, keyDown: false, injected: false).Suppress);
+        }
+
+        Assert.True(state.Observe(NativeKeyboard.VK_G, keyDown: false, injected: false).Suppress);
+        if (!windowsUpFirst)
+        {
+            Assert.True(state.Observe(windowsKey, keyDown: false, injected: false).Suppress);
+        }
+
+        Assert.Equal(default, state.Observe(NativeKeyboard.VK_G, keyDown: true, injected: false));
+        Assert.Equal(default, state.Observe(NativeKeyboard.VK_G, keyDown: false, injected: false));
+    }
+
+    [Fact]
+    public void WinG_FailedReleaseDoesNotRetryOnRepeatOrSwallowPhysicalUps()
+    {
+        FirmwareChordStateMachine state = new();
+        _ = state.Observe(NativeKeyboard.VK_LWIN, keyDown: true, injected: false);
+        Assert.True(state.Observe(NativeKeyboard.VK_G, keyDown: true, injected: false).ReleaseLeftWindows);
+        state.CommitSyntheticReleases(false, false);
+        Assert.Equal(default, state.Observe(NativeKeyboard.VK_G, keyDown: true, injected: false));
+        Assert.Equal(default, state.Observe(NativeKeyboard.VK_G, keyDown: false, injected: false));
+        Assert.Equal(default, state.Observe(NativeKeyboard.VK_LWIN, keyDown: false, injected: false));
+    }
+
+    [Fact]
+    public void WinG_WithModifiersMatchesHcKeyDownInterception()
+    {
+        FirmwareChordStateMachine state = new();
+        state.SynchronizeModifiers(true, true, true);
+        _ = state.Observe(NativeKeyboard.VK_LWIN, keyDown: true, injected: false);
+        Assert.True(state.Observe(NativeKeyboard.VK_G, keyDown: true, injected: false).ReleaseLeftWindows);
+    }
+
+    [Fact]
+    public void WinG_AfterOrphanReleaseStillConsumesGUp()
+    {
+        FirmwareChordStateMachine state = new();
+        _ = state.Observe(NativeKeyboard.VK_LWIN, keyDown: true, injected: false);
+        _ = state.Observe(NativeKeyboard.VK_G, keyDown: false, injected: false);
+        state.CommitSyntheticReleases(true, false);
+        Assert.Equal(new ChordDecision(true, false, false), state.Observe(NativeKeyboard.VK_G, keyDown: true, injected: false));
+        Assert.True(state.Observe(NativeKeyboard.VK_LWIN, keyDown: false, injected: false).Suppress);
+        Assert.True(state.Observe(NativeKeyboard.VK_G, keyDown: false, injected: false).Suppress);
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    public void WinG_BothWindowsKeysSuppressOnlyAcceptedSyntheticReleases(bool leftAccepted, bool rightAccepted)
+    {
+        FirmwareChordStateMachine state = new();
+        _ = state.Observe(NativeKeyboard.VK_LWIN, true, false);
+        _ = state.Observe(NativeKeyboard.VK_RWIN, true, false);
+        Assert.Equal(new ChordDecision(true, true, true), state.Observe(NativeKeyboard.VK_G, true, false));
+        state.CommitSyntheticReleases(leftAccepted, rightAccepted);
+        Assert.Equal(leftAccepted, state.Observe(NativeKeyboard.VK_LWIN, false, false).Suppress);
+        Assert.Equal(rightAccepted, state.Observe(NativeKeyboard.VK_RWIN, false, false).Suppress);
+        Assert.True(state.Observe(NativeKeyboard.VK_G, false, false).Suppress);
+    }
+
+    [Fact]
+    public void WinG_ResetClearsAnActiveSuppression()
+    {
+        FirmwareChordStateMachine state = new();
+        _ = state.Observe(NativeKeyboard.VK_LWIN, true, false);
+        _ = state.Observe(NativeKeyboard.VK_G, true, false);
+        state.CommitSyntheticReleases(true, false);
+        state.Reset();
+        Assert.Equal(default, state.Observe(NativeKeyboard.VK_G, false, false));
+        Assert.Equal(default, state.Observe(NativeKeyboard.VK_LWIN, false, false));
+    }
+
+    [Fact]
+    public void WinG_InjectedGDoesNotStartOrEndPhysicalSuppression()
+    {
+        FirmwareChordStateMachine state = new();
+        _ = state.Observe(NativeKeyboard.VK_LWIN, true, false);
+        Assert.Equal(default, state.Observe(NativeKeyboard.VK_G, true, true));
+        Assert.True(state.Observe(NativeKeyboard.VK_G, true, false).ReleaseLeftWindows);
+        state.CommitSyntheticReleases(true, false);
+        Assert.Equal(default, state.Observe(NativeKeyboard.VK_G, false, true));
+        Assert.True(state.Observe(NativeKeyboard.VK_G, false, false).Suppress);
     }
 
     [Theory]
