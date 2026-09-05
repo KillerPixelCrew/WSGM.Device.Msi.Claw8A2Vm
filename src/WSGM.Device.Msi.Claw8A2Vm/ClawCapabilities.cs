@@ -69,17 +69,81 @@ internal sealed class ClawA2VmPowerCapability(IMsiWmiTransport transport)
             .ConfigureAwait(false);
     }
 
+    public async ValueTask<CapabilityCommandResult> ApplyScenarioAsync(
+        CapabilityCommand command,
+        string scenario,
+        CancellationToken cancellationToken)
+    {
+        PowerPair before = await ReadAsync(cancellationToken).ConfigureAwait(false);
+        if ((before.Scenario & 0x80) == 0)
+        {
+            return Rejected(command, CapabilityReasonCode.Unsupported, "Firmware does not support scenario selection.");
+        }
+        int target = scenario switch
+        {
+            "comfort" => 0xC0,
+            "green" => 0xC1,
+            "eco" => 0xC2,
+            "user" => 0xC3,
+            "sport" => 0xC4,
+            "inactive" => before.Scenario & ~0x40,
+            _ => -1,
+        };
+        if (target < 0)
+        {
+            return Rejected(command, CapabilityReasonCode.ValueOutOfRange, "Unknown firmware scenario.");
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            if (before.Scenario != target)
+            {
+                await WriteDataAsync(ClawHardwareFacts.ScenarioAddress, target, cancellationToken).ConfigureAwait(false);
+            }
+            PowerPair readback = await ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (readback.Scenario == target)
+            {
+                return Verified(command, new CapabilityValue { Kind = CapabilityValueKind.Choice, ChoiceValue = scenario });
+            }
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // The firmware may have changed both scenario and watt limits before reporting failure.
+        }
+        RollbackResult rollback;
+        try
+        {
+            rollback = await RestoreAsync(before, CancellationToken.None).ConfigureAwait(false)
+                ? RollbackResult.RestoredVerified : RollbackResult.RestoredUnverified;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            rollback = RollbackResult.RestoreFailed;
+        }
+        return new CapabilityCommandResult
+        {
+            CommandId = command.CommandId,
+            Outcome = CommandOutcome.Indeterminate,
+            Reason = new CapabilityReason(CapabilityReasonCode.TransportFaulted, "Firmware scenario readback failed."),
+            Rollback = rollback,
+            CompletedAt = DateTimeOffset.UtcNow,
+        };
+    }
+
     public async ValueTask<bool> RestoreAsync(PowerPair snapshot, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         PowerPair current = await ReadAsync(cancellationToken).ConfigureAwait(false);
-        await WritePairOrderedAsync(current, snapshot.SustainedWatts, snapshot.BoostWatts, cancellationToken)
-            .ConfigureAwait(false);
         if (current.Scenario != snapshot.Scenario)
         {
             await WriteDataAsync(ClawHardwareFacts.ScenarioAddress, snapshot.Scenario, cancellationToken)
                 .ConfigureAwait(false);
+            current = await ReadAsync(cancellationToken).ConfigureAwait(false);
         }
+
+        // A scenario switch can reset watt limits. Restore the exact pair after the scenario.
+        await WritePairOrderedAsync(current, snapshot.SustainedWatts, snapshot.BoostWatts, cancellationToken)
+            .ConfigureAwait(false);
 
         PowerPair readback = await ReadAsync(cancellationToken).ConfigureAwait(false);
         return readback == snapshot;

@@ -67,6 +67,12 @@ use zero-filled command envelopes.
 
 - Power: keep PL1/PL2 within 8-37 W and PL1 <= PL2. Use ordered writes, exact readback, and rollback
   of the original pair.
+- Scenarios: presets map Super Battery/Balanced/Extreme Performance to Eco/Green/Sport on AC
+  and Comfort on battery, following HC's local ClawA1M handler inherited by ClawA2VM. Journal the
+  exact original scenario byte with the watt pair. Select or restore the scenario before the pair,
+  since firmware can reset power limits. Publish the resulting pair before reporting scenario
+  success; inactive SHIFT must not be reported as an active preset. This mapping is source evidence,
+  not an attended verification of its firmware effects.
 - Charge: 60-100 percent is a persistent user setting. Verify it and roll back failed/cancelled
   changes; do not restore a successful choice on normal stop.
 - Fans: one six-point semantic curve applies atomically to both channels under one snapshot. Verify

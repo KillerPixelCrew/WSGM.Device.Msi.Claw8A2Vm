@@ -6,9 +6,18 @@ OEM buttons, variable refresh, and the physical glyphs shown in Steam.
 
 The plugin also declares three power-profile shortcuts for WSGM's Device page and Steam QAM:
 Super Battery (8/9 W, Better Battery), Balanced (17/18 W, balanced Windows mode), and Extreme
-Performance (30/31 W, Best Performance). The watt pair is PL1/PL2. WSGM applies the power limits
-and Windows mode, then derives Custom whenever the observed values no longer match. Presets do
-not change CPU boost, Intel Endurance Gaming, fan settings, or the Windows power plan.
+Performance (30/31 W, Best Performance). The watt pair is PL1/PL2. Their EC scenarios on AC are
+Eco, Green and Sport respectively; all three use Comfort on battery. WSGM selects the scenario
+before applying watt limits and Windows mode, then derives Custom whenever any observed target
+no longer matches. Presets do not directly change CPU boost, Intel Endurance Gaming, fan controls,
+or the Windows power plan. Firmware effects of the scenario itself remain device-dependent.
+
+The mapping follows `ClawA1M.PowerProfileManager_Applied`, inherited by `ClawA2VM`, in the local
+Handheld Companion reference at revision `5c94abca83f8711ff5620906871b31a41c76bf05`.
+HC's battery `ShiftType.None` maps to mode 0 with the active bits set, which means Comfort
+(`0xC0`), not disabled SHIFT. The plugin verifies the exact scenario byte, publishes the resulting
+watt pair, and restores the first original scenario before its original watt pair at cleanup.
+Fake-transport tests cover these paths; no new live AC/battery scenario pass is claimed.
 
 It is also **the reference implementation of the
 [WSGM Device SDK](https://github.com/KillerPixelCrew/WSGM.Device.Sdk)** — the plugin to read, and

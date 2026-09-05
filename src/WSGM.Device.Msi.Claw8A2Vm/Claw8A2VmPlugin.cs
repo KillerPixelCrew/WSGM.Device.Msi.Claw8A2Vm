@@ -264,7 +264,11 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
 
             if (_host is not null && result.Outcome is CommandOutcome.AppliedVerified)
             {
-                await PublishPostCommandObservationAsync(command.CapabilityId).ConfigureAwait(false);
+                bool published = await PublishPostCommandObservationAsync(command.CapabilityId).ConfigureAwait(false);
+                if (!published && command.CapabilityId == CapabilityIds.Scenario)
+                {
+                    return Indeterminate(command, "Scenario was written, but its resulting power limits could not be published.");
+                }
             }
 
             return result;
@@ -1033,8 +1037,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 CapabilityIds.Scenario,
                 CapabilityRole.ScenarioMode,
                 DisplayKey.PerformanceProfile,
-                ["comfort", "green", "eco", "user", "sport"],
-                writable: false,
+                ["comfort", "green", "eco", "user", "sport", "inactive"],
+                writable: true,
                 section: SectionIds.Power),
             ChoiceDescriptor(
                 CapabilityIds.FanMode,
@@ -1244,6 +1248,17 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 (journalCommand, token) => power.ApplyBoostAsync(
                     journalCommand,
                     journalCommand.RequestedValue!.IntegerValue!.Value,
+                    token),
+                cancellationToken),
+            CapabilityIds.Scenario => JournalCommandAsync(
+                ServiceIds.Power,
+                ClawFirmwareIdentities.Wmi,
+                command,
+                async token => ClawRecoveryValues.Power(
+                    await power.ReadAsync(token).ConfigureAwait(false)),
+                (journalCommand, token) => power.ApplyScenarioAsync(
+                    journalCommand,
+                    journalCommand.RequestedValue!.ChoiceValue!,
                     token),
                 cancellationToken),
             CapabilityIds.ChargeLimit => chargeLimit.ApplyAsync(
@@ -2009,7 +2024,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         string capabilityId,
         CancellationToken cancellationToken)
     {
-        if (capabilityId is CapabilityIds.PowerSustained or CapabilityIds.PowerBoost)
+        if (capabilityId is CapabilityIds.PowerSustained or CapabilityIds.PowerBoost or CapabilityIds.Scenario)
         {
             await _power!.RefreshAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -2032,14 +2047,16 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     /// <remarks>
     /// Capability handlers own command verification. This secondary refresh updates adjacent rows
     /// such as paired power and fan telemetry; losing it must not rewrite a verified command result
-    /// or terminate the plugin cycle.
+    /// or terminate the plugin cycle. Scenario selection requires the resulting pair before a host
+    /// can order its next watt writes, so its caller reports uncertainty when publication fails.
     /// </remarks>
-    private async ValueTask PublishPostCommandObservationAsync(string capabilityId)
+    private async ValueTask<bool> PublishPostCommandObservationAsync(string capabilityId)
     {
         try
         {
             await RefreshObservedAsync(capabilityId, CancellationToken.None).ConfigureAwait(false);
             await PublishCapabilityStatesAsync(CancellationToken.None).ConfigureAwait(false);
+            return true;
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
@@ -2047,6 +2064,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 "observation",
                 $"Post-command refresh for '{capabilityId}' failed; the verified command result is retained",
                 ex);
+            return false;
         }
     }
 
@@ -2517,7 +2535,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     private static CapabilityValue Scenario(byte raw) => new()
     {
         Kind = CapabilityValueKind.Choice,
-        ChoiceValue = (raw & 0x3F) switch
+        ChoiceValue = (raw & 0xC0) != 0xC0 ? "inactive" : (raw & 0x3F) switch
         {
             0 => "comfort",
             1 => "green",
