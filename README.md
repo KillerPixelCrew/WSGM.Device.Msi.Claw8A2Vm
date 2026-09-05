@@ -64,6 +64,18 @@ value replaces it. Clamping refinement to a maximum step, which looks like the s
 one thing that must not be done here — every honest window after the turn stops is further away than
 such a clamp allows, so the wrong offset would outlive the entire device cycle.
 
+### OEM keyboard side effects
+
+The right OEM button also emits a malformed Windows-key chord: an orphan `G UP` for a short
+press, or `Tab UP` for a long press. The plugin suppresses those measured sequences while its
+OEM service is active, including on the Windows desktop. Normal keyboard Win+G and Win+Tab,
+Ctrl/Alt/Shift-modified chords, injected input, volume keys and unknown sequences pass through.
+
+The synthetic Win-key release uses the full 40-byte Windows x64 `INPUT` record. A keyboard-only
+union incorrectly reduced it to 32 bytes, so Windows rejected the release and the hook passed
+the firmware chord through. Layout and sequence tests cover the correction without installing a
+hook or sending input to the live desktop. No new device observation is claimed by those tests.
+
 ## Hardware knowledge is observed, not documented
 
 Every register, report layout and WMI method here was established on a physical device. `PROVENANCE.md`

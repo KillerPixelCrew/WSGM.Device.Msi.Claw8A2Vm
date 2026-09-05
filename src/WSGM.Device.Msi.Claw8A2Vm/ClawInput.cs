@@ -612,7 +612,9 @@ internal static partial class NativeKeyboard
         public nuint ExtraInfo;
     }
 
-    [StructLayout(LayoutKind.Explicit)]
+    // INPUT reserves the full mouse-sized union even for keyboard events: 32 bytes on x64.
+    // A keyboard-only union makes cbSize 32 instead of 40, so SendInput rejects every release.
+    [StructLayout(LayoutKind.Explicit, Size = 32)]
     public struct InputUnion
     {
         [FieldOffset(0)]
