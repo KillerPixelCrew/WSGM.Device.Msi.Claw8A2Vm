@@ -17,5 +17,7 @@ internal static class ClawPowerPresets
         { ScenarioOnAc = "green", ScenarioOnDc = "comfort" },
         new("extreme-performance", "Extreme Performance", 30, 31, DevicePowerMode.BestPerformance)
         { ScenarioOnAc = "sport", ScenarioOnDc = "comfort" },
+        new("full-power", "Full Power", 37, 37, DevicePowerMode.BestPerformance)
+        { ScenarioOnAc = "sport", ScenarioOnDc = "comfort" },
     ];
 }
