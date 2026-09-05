@@ -2,6 +2,13 @@
 
 Source revision: `HW-2026-09-03`
 
+The 2026-09-05 keyboard comparison against HandheldCompanion revision
+`5c94abca83f8711ff5620906871b31a41c76bf05`, `Helpers/FirmwareWorkarounds.cs`, found that
+synthetic Win releases also need the extended-key flag. The plugin now supplies it. HC begins
+its Win+G workaround on key-down; the plugin's orphan-up matcher is not equivalent. The
+maintainer reports Game Bar still opening after the earlier INPUT-size correction. Neither
+software correction is a new attended suppression pass.
+
 Power-preset data was checked on 2026-09-05 against HandheldCompanion commit
 `5c94abca83f8711ff5620906871b31a41c76bf05`: `Devices/MSI/ClawA2VM.cs` supplies the
 8/8/9, 17/17/18 and 30/30/31 W overrides; `ClawA1M.cs` and `Properties/Resources.resx`

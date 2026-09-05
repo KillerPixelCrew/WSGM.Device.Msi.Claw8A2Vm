@@ -573,6 +573,7 @@ internal static partial class NativeKeyboard
     public const nuint WM_SYSKEYDOWN = 0x0104;
     public const nuint WM_SYSKEYUP = 0x0105;
     public const uint LLKHF_INJECTED = 0x10;
+    public const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
     public const uint KEYEVENTF_KEYUP = 0x0002;
     public const uint INPUT_KEYBOARD = 1;
     public const uint VK_TAB = 0x09;
@@ -652,7 +653,8 @@ internal static partial class NativeKeyboard
             Keyboard = new KeyboardInput
             {
                 VirtualKey = checked((ushort)virtualKey),
-                Flags = keyUp ? KEYEVENTF_KEYUP : 0,
+                Flags = (keyUp ? KEYEVENTF_KEYUP : 0)
+                    | (virtualKey is VK_LWIN or VK_RWIN ? KEYEVENTF_EXTENDEDKEY : 0),
                 ExtraInfo = extraInfo,
             },
         },

@@ -18,8 +18,19 @@ public sealed class FirmwareChordTests
         NativeKeyboard.Input release = NativeKeyboard.KeyInput(NativeKeyboard.VK_LWIN, keyUp: true, marker);
         Assert.Equal(NativeKeyboard.INPUT_KEYBOARD, release.Type);
         Assert.Equal(NativeKeyboard.VK_LWIN, (uint)release.Data.Keyboard.VirtualKey);
-        Assert.Equal(NativeKeyboard.KEYEVENTF_KEYUP, release.Data.Keyboard.Flags);
+        Assert.Equal(NativeKeyboard.KEYEVENTF_KEYUP | NativeKeyboard.KEYEVENTF_EXTENDEDKEY, release.Data.Keyboard.Flags);
         Assert.Equal((nuint)marker, release.Data.Keyboard.ExtraInfo);
+    }
+
+    [Theory]
+    [InlineData(NativeKeyboard.VK_LWIN, true, 3u)]
+    [InlineData(NativeKeyboard.VK_RWIN, true, 3u)]
+    [InlineData(NativeKeyboard.VK_LWIN, false, 1u)]
+    [InlineData(NativeKeyboard.VK_DUMMY, false, 0u)]
+    [InlineData(NativeKeyboard.VK_DUMMY, true, 2u)]
+    public void SyntheticInput_MarksWindowsKeysAsExtended(uint key, bool keyUp, uint flags)
+    {
+        Assert.Equal(flags, NativeKeyboard.KeyInput(key, keyUp, 0).Data.Keyboard.Flags);
     }
 
     [Theory]

@@ -94,6 +94,13 @@ union incorrectly reduced it to 32 bytes, so Windows rejected the release and th
 the firmware chord through. Layout and sequence tests cover the correction without installing a
 hook or sending input to the live desktop. No new device observation is claimed by those tests.
 
+The Win release also carries `KEYEVENTF_EXTENDEDKEY`, as in HC's
+`Helpers/FirmwareWorkarounds.cs` at revision `5c94abca83f8711ff5620906871b31a41c76bf05`.
+The matcher is still narrower than HC: HC starts suppressing on Win+G key-down, including an
+ordinary keyboard chord; this plugin only matches orphan key-up. The maintainer reported that
+Game Bar still opens after the layout fix. The extended-key correction has software tests only;
+desktop suppression remains awaiting attended validation.
+
 ## Hardware knowledge is observed, not documented
 
 Every register, report layout and WMI method here was established on a physical device. `PROVENANCE.md`

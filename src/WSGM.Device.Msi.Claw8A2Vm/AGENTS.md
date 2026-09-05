@@ -103,6 +103,8 @@ use zero-filled command envelopes.
 - Keep the x64 `INPUT` ABI at 40 bytes with its 32-byte union, including for keyboard-only
   injection. A smaller record makes `SendInput` reject the synthetic Win release and the hook
   pass the firmware chord through. Keep the layout and shortcut-preservation regression tests.
+- Synthetic left/right Win events must carry `KEYEVENTF_EXTENDEDKEY`; dummy-key events must not.
+  Source comparison and layout tests do not establish that desktop Game Bar suppression works.
 - Bind only the measured legacy Sensor API accelerometer/gyrometer identities and fields. Read
   accelerometer before gyrometer, reject duplicate counters, and keep the bounded drop-oldest
   channel.
