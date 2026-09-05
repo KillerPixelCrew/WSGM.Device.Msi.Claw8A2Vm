@@ -41,6 +41,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     private bool _quiescing;
     private bool _disposed;
     private CancellationTokenSource? _observationLoop;
+    private CancellationToken _observationToken;
     private Task? _observationTask;
 
     /// <summary>How often the plugin re-reads and republishes what it observes.</summary>
@@ -264,10 +265,17 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
 
             if (_host is not null && result.Outcome is CommandOutcome.AppliedVerified)
             {
-                bool published = await PublishPostCommandObservationAsync(command.CapabilityId).ConfigureAwait(false);
+                bool published = await PublishPostCommandObservationAsync(command, cancellationToken).ConfigureAwait(false);
                 if (!published && command.CapabilityId == CapabilityIds.Scenario)
                 {
-                    return Indeterminate(command, "Scenario was written, but its resulting power limits could not be published.");
+                    return result with
+                    {
+                        Outcome = CommandOutcome.Indeterminate,
+                        ReadbackValue = null,
+                        Rollback = RollbackResult.NotRequired,
+                        Reason = new(CapabilityReasonCode.HostUnavailable,
+                            "Scenario was written, but its resulting power limits could not be published."),
+                    };
                 }
             }
 
@@ -1752,6 +1760,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
 
         foreach (CapabilityDescriptor descriptor in _descriptorSet.Descriptors)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             ClawServiceStatus? service = ServiceForCapability(descriptor.CapabilityId);
             if (service is null)
             {
@@ -1778,7 +1787,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                     DescriptorGeneration = _descriptorSet.Generation,
                     CycleGeneration = _cycleGeneration,
                 },
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken).AsTask().WaitAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -1896,6 +1905,7 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
         StopObservationLoop();
         CancellationTokenSource loop = new();
         _observationLoop = loop;
+        _observationToken = loop.Token;
         _observationTask = Task.Run(() => ObservationLoopAsync(loop.Token));
     }
 
@@ -2034,19 +2044,24 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     /// or terminate the plugin cycle. Scenario selection requires the resulting pair before a host
     /// can order its next watt writes, so its caller reports uncertainty when publication fails.
     /// </remarks>
-    private async ValueTask<bool> PublishPostCommandObservationAsync(string capabilityId)
+    private async ValueTask<bool> PublishPostCommandObservationAsync(CapabilityCommand command, CancellationToken cancellationToken)
     {
+        using CancellationTokenSource bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _observationToken);
+        TimeSpan remaining = command.Deadline - DateTimeOffset.UtcNow;
+        bounded.CancelAfter(remaining <= TimeSpan.Zero ? TimeSpan.Zero
+            : remaining < TimeSpan.FromSeconds(2) ? remaining : TimeSpan.FromSeconds(2));
         try
         {
-            await RefreshObservedAsync(capabilityId, CancellationToken.None).ConfigureAwait(false);
-            await PublishCapabilityStatesAsync(CancellationToken.None).ConfigureAwait(false);
+            bounded.Token.ThrowIfCancellationRequested();
+            await RefreshObservedAsync(command.CapabilityId, bounded.Token).ConfigureAwait(false);
+            await PublishCapabilityStatesAsync(bounded.Token).ConfigureAwait(false);
             return true;
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             PluginTrace.Failure(
                 "observation",
-                $"Post-command refresh for '{capabilityId}' failed; the verified command result is retained",
+                $"Post-command refresh for '{command.CapabilityId}' failed; scenario results require adjacent power readback",
                 ex);
             return false;
         }

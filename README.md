@@ -17,6 +17,9 @@ Handheld Companion reference at revision `5c94abca83f8711ff5620906871b31a41c76bf
 HC's battery `ShiftType.None` maps to mode 0 with the active bits set, which means Comfort
 (`0xC0`), not disabled SHIFT. The plugin verifies the exact scenario byte, publishes the resulting
 watt pair, and restores the first original scenario before its original watt pair at cleanup.
+Post-command observation is cancelled on quiesce and bounded by the command deadline and a
+two-second publication budget. A scenario publication failure reports uncertainty without claiming
+a rollback was attempted; the recovery journal still owns restoration of temporary state.
 Fake-transport tests cover these paths; no new live AC/battery scenario pass is claimed.
 
 It is also **the reference implementation of the
