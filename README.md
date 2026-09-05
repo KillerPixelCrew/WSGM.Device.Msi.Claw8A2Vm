@@ -146,3 +146,5 @@ plugin to any particular licence. Third-party notices are in
 `handheld-controller-glyphs`, and no Intel code is redistributed.
 
 The package places its controls in the SDK shared Power, RGB and Info sections. WSGM can combine them with its own controls and assign the declared presets separately for AC and battery power.
+
+The fake-hardware publication test writes claw-ui-publication.json beside its test assembly for WSGM's complete Device-page visual fixture. Refresh that host fixture after changing descriptors.

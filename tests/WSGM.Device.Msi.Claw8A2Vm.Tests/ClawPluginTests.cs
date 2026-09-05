@@ -483,6 +483,11 @@ public sealed class ClawPluginTests
         Assert.Equal(PluginOperationalState.Active, result.State);
         CapabilityDescriptorSet descriptors = Assert.Single(host.DescriptorSets);
 
+        // Offline publication for the host's full Device-page visual fixture. No live hardware is used.
+        System.IO.File.WriteAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "claw-ui-publication.json"),
+            System.Text.Json.JsonSerializer.Serialize(new { Descriptors = descriptors, States = host.CapabilityStates },
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+
         // The overlay layout ships with the set, and a dangling reference would silently strand a
         // row in a WSGM fallback group. Cooling was folded into Power, then Display's single
         // variable-refresh toggle joined it and the three ownership rows became Info
