@@ -333,7 +333,7 @@ public sealed class ClawPluginTests
     }
 
     [Fact]
-    public void Observe_FirmwareOrphanGUp_SuppressesButRealAndModifiedChordsPass()
+    public void Observe_FirmwareOrphanGUpAndWinGDown_SuppressButModifiedOrphansPass()
     {
         FirmwareChordStateMachine firmware = new();
         _ = firmware.Observe(NativeKeyboard.VK_LWIN, keyDown: true, injected: false);
@@ -346,8 +346,9 @@ public sealed class ClawPluginTests
 
         FirmwareChordStateMachine physical = new();
         _ = physical.Observe(NativeKeyboard.VK_LWIN, keyDown: true, injected: false);
-        _ = physical.Observe(NativeKeyboard.VK_G, keyDown: true, injected: false);
-        Assert.False(physical.Observe(NativeKeyboard.VK_G, keyDown: false, injected: false).Suppress);
+        Assert.True(physical.Observe(NativeKeyboard.VK_G, keyDown: true, injected: false).Suppress);
+        physical.CommitSyntheticReleases(leftAccepted: true, rightAccepted: false);
+        Assert.True(physical.Observe(NativeKeyboard.VK_G, keyDown: false, injected: false).Suppress);
 
         FirmwareChordStateMachine modified = new();
         _ = modified.Observe(NativeKeyboard.VK_CONTROL, keyDown: true, injected: false);

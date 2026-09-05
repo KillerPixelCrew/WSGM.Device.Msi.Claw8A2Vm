@@ -174,6 +174,8 @@ internal sealed class FirmwareChordStateMachine
     private bool _altDown;
     private bool _shiftDown;
     private bool _gDown;
+    private bool _gSuppressed;
+    private bool _pendingGSuppression;
     private bool _tabDown;
 
     public ChordDecision Observe(uint virtualKey, bool keyDown, bool injected)
@@ -205,7 +207,7 @@ internal sealed class FirmwareChordStateMachine
                 _shiftDown = keyDown;
                 return default;
             case NativeKeyboard.VK_G:
-                return ObserveTarget(ref _gDown, keyDown);
+                return ObserveG(keyDown);
             case NativeKeyboard.VK_TAB:
                 return ObserveTarget(ref _tabDown, keyDown);
             default:
@@ -217,6 +219,11 @@ internal sealed class FirmwareChordStateMachine
     {
         _leftWindowsReleased |= leftAccepted;
         _rightWindowsReleased |= rightAccepted;
+        if (_pendingGSuppression)
+        {
+            _gSuppressed = leftAccepted || rightAccepted;
+            _pendingGSuppression = false;
+        }
     }
 
     public void SynchronizeModifiers(bool controlDown, bool altDown, bool shiftDown)
@@ -236,6 +243,8 @@ internal sealed class FirmwareChordStateMachine
         _altDown = false;
         _shiftDown = false;
         _gDown = false;
+        _gSuppressed = false;
+        _pendingGSuppression = false;
         _tabDown = false;
     }
 
@@ -284,6 +293,32 @@ internal sealed class FirmwareChordStateMachine
         }
 
         return default;
+    }
+
+    private ChordDecision ObserveG(bool keyDown)
+    {
+        if (_gSuppressed)
+        {
+            _gDown = keyDown;
+            _gSuppressed = keyDown;
+            return new ChordDecision(true, false, false);
+        }
+
+        // Like HC, intercept the initial G down before Windows can activate Game Bar.
+        // The hook cannot distinguish the OEM button from ordinary keyboard Win+G.
+        if (keyDown && !_gDown && (_leftWindowsDown || _rightWindowsDown))
+        {
+            _gDown = true;
+            _pendingGSuppression = (_leftWindowsDown && !_leftWindowsReleased)
+                || (_rightWindowsDown && !_rightWindowsReleased);
+            _gSuppressed = !_pendingGSuppression;
+            return new ChordDecision(
+                true,
+                _leftWindowsDown && !_leftWindowsReleased,
+                _rightWindowsDown && !_rightWindowsReleased);
+        }
+
+        return ObserveTarget(ref _gDown, keyDown);
     }
 
     private ChordDecision ObserveTarget(ref bool targetDown, bool keyDown)
