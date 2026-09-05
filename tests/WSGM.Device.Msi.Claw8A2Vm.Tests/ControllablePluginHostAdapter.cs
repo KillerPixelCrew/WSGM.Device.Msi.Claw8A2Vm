@@ -23,6 +23,8 @@ internal sealed class ControllablePluginHostAdapter(long cycleGeneration) : IPlu
     public bool BlockControllerSamples { get; set; }
 
     public bool BlockOemEvents { get; set; }
+    public TaskCompletionSource? CapabilityPublicationBlock { get; set; }
+    public TaskCompletionSource CapabilityPublicationEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public IReadOnlyList<CapabilityDescriptorSet> DescriptorSets => _inner.DescriptorSets;
 
@@ -57,8 +59,15 @@ internal sealed class ControllablePluginHostAdapter(long cycleGeneration) : IPlu
 
     public ValueTask PublishCapabilityStateAsync(
         CapabilityState state,
-        CancellationToken cancellationToken) =>
-        _inner.PublishCapabilityStateAsync(state, cancellationToken);
+        CancellationToken cancellationToken)
+    {
+        if (CapabilityPublicationBlock is { } blocked)
+        {
+            CapabilityPublicationEntered.TrySetResult();
+            return new ValueTask(blocked.Task);
+        }
+        return _inner.PublishCapabilityStateAsync(state, cancellationToken);
+    }
 
     public ValueTask PublishPhysicalDevicesAsync(
         IReadOnlyList<PhysicalDeviceIdentity> devices,

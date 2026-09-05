@@ -123,6 +123,18 @@ public sealed class ClawPluginTests
         Assert.True(sample.Buttons.HasFlag(CanonicalButtons.DPadRight));
     }
 
+    [Theory]
+    [InlineData(0x10, CanonicalButtons.RearPaddle1)]
+    [InlineData(0x08, CanonicalButtons.RearPaddle2)]
+    public void RearPaddlesHaveIndependentMeasuredBits(byte bit, CanonicalButtons expected)
+    {
+        byte[] report = new byte[64];
+        report[0] = 0x01;
+        report[7] = bit;
+        var sample = ClawControllerCodec.Decode(report, 1, CycleGeneration, DateTimeOffset.UnixEpoch);
+        Assert.Equal(expected, sample.Buttons & (CanonicalButtons.RearPaddle1 | CanonicalButtons.RearPaddle2));
+    }
+
     [Fact]
     public void OemButtons_ReachTheVirtualPadAsSteamAndQuickAccess()
     {
@@ -483,6 +495,11 @@ public sealed class ClawPluginTests
         Assert.Equal(PluginOperationalState.Active, result.State);
         CapabilityDescriptorSet descriptors = Assert.Single(host.DescriptorSets);
 
+        // Offline publication for the host's full Device-page visual fixture. No live hardware is used.
+        System.IO.File.WriteAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "claw-ui-publication.json"),
+            System.Text.Json.JsonSerializer.Serialize(new { Descriptors = descriptors, States = host.CapabilityStates },
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+
         // The overlay layout ships with the set, and a dangling reference would silently strand a
         // row in a WSGM fallback group. Cooling was folded into Power, then Display's single
         // variable-refresh toggle joined it and the three ownership rows became Info
@@ -513,9 +530,14 @@ public sealed class ClawPluginTests
         Assert.True(DevicePowerPreset.TryValidate(descriptors.Descriptors, out string? presetError), presetError);
         Assert.Equal(new DevicePowerPreset[]
         {
-            new("super-battery", "Super Battery", 8, 9, DevicePowerMode.BetterBattery),
-            new("balanced", "Balanced", 17, 18, DevicePowerMode.Balanced),
-            new("extreme-performance", "Extreme Performance", 30, 31, DevicePowerMode.BestPerformance),
+            new("super-battery", "Super Battery", 8, 9, DevicePowerMode.BetterBattery)
+            { ScenarioOnAc = "eco", ScenarioOnDc = "comfort" },
+            new("balanced", "Balanced", 17, 18, DevicePowerMode.Balanced)
+            { ScenarioOnAc = "green", ScenarioOnDc = "comfort" },
+            new("extreme-performance", "Extreme Performance", 30, 31, DevicePowerMode.BestPerformance)
+            { ScenarioOnAc = "sport", ScenarioOnDc = "comfort" },
+            new("full-power", "Full Power", 37, 37, DevicePowerMode.BestPerformance)
+            { ScenarioOnAc = "sport", ScenarioOnDc = "comfort" },
         }, sustained.PowerPresets);
         Assert.Contains(descriptors.Descriptors, descriptor =>
             descriptor.CapabilityId == CapabilityIds.ChargeLimit
@@ -691,6 +713,143 @@ public sealed class ClawPluginTests
             state.Root,
             CancellationToken.None);
         Assert.Empty(completed.OutstandingEntries);
+    }
+
+    [Theory]
+    [InlineData("comfort", 0xC0)]
+    [InlineData("green", 0xC1)]
+    [InlineData("eco", 0xC2)]
+    [InlineData("user", 0xC3)]
+    [InlineData("sport", 0xC4)]
+    public async Task ScenarioSelectionVerifiesAndStopRestoresFirstOriginal(string scenario, int expected)
+    {
+        using TemporaryDirectory state = new();
+        FakeWmiTransport wmi = new();
+        wmi.SetData(ClawHardwareFacts.ScenarioAddress, 0x81);
+        wmi.AfterSetter = (method, package) =>
+        {
+            if (method == "Set_Data" && package[0] == ClawHardwareFacts.ScenarioAddress)
+            {
+                wmi.SetData(ClawHardwareFacts.PowerSustainedAddress, 8);
+                wmi.SetData(ClawHardwareFacts.PowerBoostAddress, 9);
+            }
+        };
+        await using Claw8A2VmPlugin plugin = new(CreateServices(wmi));
+        TestPluginHostAdapter host = new(CycleGeneration);
+        await plugin.StartAsync(StartContext(host, state.Root), CancellationToken.None);
+        Assert.Equal("inactive", host.CapabilityStates.Last(s => s.CapabilityId == CapabilityIds.Scenario).ObservedValue?.ChoiceValue);
+        var result = await plugin.ExecuteCommandAsync(Command(CapabilityIds.Scenario, null,
+            new CapabilityValue { Kind = CapabilityValueKind.Choice, ChoiceValue = scenario }), CancellationToken.None);
+        Assert.Equal(CommandOutcome.AppliedVerified, result.Outcome);
+        Assert.Equal(expected, wmi.ReadData(ClawHardwareFacts.ScenarioAddress));
+        Assert.Equal(scenario, result.ReadbackValue?.ChoiceValue);
+        Assert.Equal(8, host.CapabilityStates.Last(s => s.CapabilityId == CapabilityIds.PowerSustained).ObservedValue?.IntegerValue);
+        var stop = await plugin.StopAsync(new PluginStopContext(PluginStopReason.IntegrationDisabled,
+            DateTimeOffset.UtcNow.AddSeconds(10)), CancellationToken.None);
+        Assert.Equal(PluginStopStatus.Clean, stop.Status);
+        Assert.Equal(0x81, wmi.ReadData(ClawHardwareFacts.ScenarioAddress));
+        Assert.Equal(30, wmi.ReadData(ClawHardwareFacts.PowerSustainedAddress));
+        Assert.Equal(37, wmi.ReadData(ClawHardwareFacts.PowerBoostAddress));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ScenarioMismatchOrCancellationRollsBackExactStateWithoutRetry(bool cancel)
+    {
+        FakeWmiTransport wmi = new();
+        using CancellationTokenSource cancellation = new();
+        wmi.AfterSetter = (method, package) =>
+        {
+            if (method != "Set_Data" || package[0] != ClawHardwareFacts.ScenarioAddress) { return; }
+            wmi.SetData(ClawHardwareFacts.PowerSustainedAddress, 8);
+            wmi.SetData(ClawHardwareFacts.PowerBoostAddress, 9);
+            if (package[1] == 0xC4)
+            {
+                if (cancel) { cancellation.Cancel(); }
+                else { wmi.SetData(ClawHardwareFacts.ScenarioAddress, 0xC2); }
+            }
+        };
+        ClawA2VmPowerCapability capability = new(wmi);
+        var result = await capability.ApplyScenarioAsync(Command(CapabilityIds.Scenario, null,
+            new CapabilityValue { Kind = CapabilityValueKind.Choice, ChoiceValue = "sport" }), "sport", cancellation.Token);
+        Assert.Equal(CommandOutcome.Indeterminate, result.Outcome);
+        Assert.Equal(RollbackResult.RestoredVerified, result.Rollback);
+        Assert.Equal(new PowerPair(30, 37, 0xC1), await capability.ReadAsync(CancellationToken.None));
+        Assert.Single(wmi.Writes, write => write.Package[0] == ClawHardwareFacts.ScenarioAddress && write.Package[1] == 0xC4);
+    }
+
+    [Fact]
+    public async Task UnsupportedScenarioIsRejectedWithoutWrites()
+    {
+        FakeWmiTransport wmi = new();
+        wmi.SetData(ClawHardwareFacts.ScenarioAddress, 1);
+        ClawA2VmPowerCapability capability = new(wmi);
+        var result = await capability.ApplyScenarioAsync(Command(CapabilityIds.Scenario, null,
+            new CapabilityValue { Kind = CapabilityValueKind.Choice, ChoiceValue = "sport" }), "sport", CancellationToken.None);
+        Assert.Equal(CommandOutcome.Rejected, result.Outcome);
+        Assert.Empty(wmi.Writes);
+    }
+
+    [Theory]
+    [InlineData(0xC1, 0x81)]
+    [InlineData(0xC4, 0x84)]
+    public async Task InactiveScenarioClearsOnlyTheActiveBit(int initial, int expected)
+    {
+        FakeWmiTransport wmi = new();
+        wmi.SetData(ClawHardwareFacts.ScenarioAddress, initial);
+        ClawA2VmPowerCapability capability = new(wmi);
+        var result = await capability.ApplyScenarioAsync(Command(CapabilityIds.Scenario, null,
+            new CapabilityValue { Kind = CapabilityValueKind.Choice, ChoiceValue = "inactive" }), "inactive", default);
+        Assert.Equal(CommandOutcome.AppliedVerified, result.Outcome);
+        Assert.Equal(expected, wmi.ReadData(ClawHardwareFacts.ScenarioAddress));
+    }
+
+    [Fact]
+    public async Task UnknownScenarioOnSupportedFirmwareIsRejectedWithoutWrites()
+    {
+        FakeWmiTransport wmi = new();
+        ClawA2VmPowerCapability capability = new(wmi);
+        var result = await capability.ApplyScenarioAsync(Command(CapabilityIds.Scenario, null,
+            new CapabilityValue { Kind = CapabilityValueKind.Choice, ChoiceValue = "turbo" }), "turbo", default);
+        Assert.Equal(CommandOutcome.Rejected, result.Outcome);
+        Assert.Equal(CapabilityReasonCode.ValueOutOfRange, result.Reason?.Code);
+        Assert.Empty(wmi.Writes);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BlockedPostCommandPublicationHonorsTimeoutOrStopWithoutInventingRollback(bool stop)
+    {
+        using TemporaryDirectory state = new();
+        FakeWmiTransport wmi = new();
+        await using Claw8A2VmPlugin plugin = new(CreateServices(wmi));
+        ControllablePluginHostAdapter host = new(CycleGeneration);
+        await plugin.StartAsync(StartContext(host, state.Root), default);
+        TaskCompletionSource blocked = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        wmi.AfterSetter = (method, package) =>
+        {
+            if (method == "Set_Data" && package[0] == ClawHardwareFacts.ScenarioAddress && package[1] == 0xC4)
+            { host.CapabilityPublicationBlock = blocked; }
+        };
+        var command = Command(CapabilityIds.Scenario, null,
+            new CapabilityValue { Kind = CapabilityValueKind.Choice, ChoiceValue = "sport" }) with
+        { Deadline = DateTimeOffset.UtcNow.AddSeconds(10) };
+        Task<CapabilityCommandResult> applying = plugin.ExecuteCommandAsync(command, default).AsTask();
+        try
+        {
+            await host.CapabilityPublicationEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            host.CapabilityPublicationBlock = null;
+            Task<PluginStopResult>? stopping = stop ? plugin.StopAsync(new PluginStopContext(
+                PluginStopReason.IntegrationDisabled, DateTimeOffset.UtcNow.AddSeconds(5)), default).AsTask() : null;
+            var result = await applying.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(CommandOutcome.Indeterminate, result.Outcome);
+            Assert.Null(result.ReadbackValue);
+            Assert.Equal(RollbackResult.NotRequired, result.Rollback);
+            if (stopping is not null) { Assert.Equal(PluginStopStatus.Clean, (await stopping).Status); }
+        }
+        finally { blocked.TrySetResult(); }
     }
 
     [Fact]
@@ -1079,6 +1238,8 @@ internal sealed class FakeWmiTransport : IMsiWmiTransport
 
     public bool FailNextSetter { get; set; }
 
+    public Action<string, byte[]>? AfterSetter { get; set; }
+
     public int ProviderAvailabilityChecks { get; private set; }
 
     public int ReadData(byte address) =>
@@ -1131,6 +1292,7 @@ internal sealed class FakeWmiTransport : IMsiWmiTransport
             _responses[(getter, selector)] = response;
         }
 
+        AfterSetter?.Invoke(methodName, package);
         return ValueTask.CompletedTask;
     }
 

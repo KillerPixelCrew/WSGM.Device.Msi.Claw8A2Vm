@@ -4,11 +4,23 @@ The device plugin that teaches [WSGM](https://github.com/KillerPixelCrew/WSGM) a
 A2VM: power and charge limits, fan behaviour, lighting, the controller and its motion sensors, the
 OEM buttons, variable refresh, and the physical glyphs shown in Steam.
 
-The plugin also declares three power-profile shortcuts for WSGM's Device page and Steam QAM:
+The plugin also declares four power profiles for WSGM's Device page and Steam QAM:
 Super Battery (8/9 W, Better Battery), Balanced (17/18 W, balanced Windows mode), and Extreme
-Performance (30/31 W, Best Performance). The watt pair is PL1/PL2. WSGM applies the power limits
-and Windows mode, then derives Custom whenever the observed values no longer match. Presets do
-not change CPU boost, Intel Endurance Gaming, fan settings, or the Windows power plan.
+Performance (30/31 W, Best Performance), plus Full Power (37/37 W, Best Performance). The watt pair is PL1/PL2. Their EC scenarios on AC are
+Eco, Green, Sport and Sport respectively; all four use Comfort on battery. WSGM selects the scenario
+before applying watt limits and Windows mode, then derives Custom whenever any observed target
+no longer matches. Presets do not directly change CPU boost, Intel Endurance Gaming, fan controls,
+or the Windows power plan. Firmware effects of the scenario itself remain device-dependent.
+
+Full Power is a WSGM addition using the device's supported maximum watt limits. The other presets and scenario mapping follow `ClawA1M.PowerProfileManager_Applied`, inherited by `ClawA2VM`, in the local
+Handheld Companion reference at revision `5c94abca83f8711ff5620906871b31a41c76bf05`.
+HC's battery `ShiftType.None` maps to mode 0 with the active bits set, which means Comfort
+(`0xC0`), not disabled SHIFT. The plugin verifies the exact scenario byte, publishes the resulting
+watt pair, and restores the first original scenario before its original watt pair at cleanup.
+Post-command observation is cancelled on quiesce and bounded by the command deadline and a
+two-second publication budget. A scenario publication failure reports uncertainty without claiming
+a rollback was attempted; the recovery journal still owns restoration of temporary state.
+Fake-transport tests cover these paths; no new live AC/battery scenario pass is claimed.
 
 It is also **the reference implementation of the
 [WSGM Device SDK](https://github.com/KillerPixelCrew/WSGM.Device.Sdk)** — the plugin to read, and
@@ -135,3 +147,7 @@ MIT. See `LICENSE`. A plugin links only the MIT SDK, never WSGM, so nothing here
 plugin to any particular licence. Third-party notices are in
 `src/WSGM.Device.Msi.Claw8A2Vm/THIRD_PARTY_NOTICES.md` — the glyph artwork is MIT from
 `handheld-controller-glyphs`, and no Intel code is redistributed.
+
+The package places its controls in the SDK shared Power, RGB and Info sections. WSGM can combine them with its own controls and assign the declared presets separately for AC and battery power.
+
+The fake-hardware publication test writes claw-ui-publication.json beside its test assembly for WSGM's complete Device-page visual fixture. Refresh that host fixture after changing descriptors.
