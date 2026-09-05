@@ -1013,7 +1013,10 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
             IntegerDescriptor(CapabilityIds.PowerSustained, CapabilityRole.PowerSustainedLimit,
                 // 37 W, matching PL2 and the device's actual ceiling, not the 30 W it ships at.
                 DisplayKey.SustainedPowerLimit, 8, 37, CapabilityUnit.Watt, writable: true,
-                section: SectionIds.Power, category: CategoryIds.Limits, order: 0),
+                section: SectionIds.Power, category: CategoryIds.Limits, order: 0) with
+                {
+                    PowerPresets = ClawPowerPresets.All,
+                },
             IntegerDescriptor(CapabilityIds.PowerBoost, CapabilityRole.PowerSlowLimit,
                 DisplayKey.BoostPowerLimit, 8, 37, CapabilityUnit.Watt, writable: true,
                 section: SectionIds.Power, category: CategoryIds.Limits, order: 1),

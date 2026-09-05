@@ -508,6 +508,15 @@ public sealed class ClawPluginTests
         Assert.Equal(CycleGeneration, descriptors.CycleGeneration);
         Assert.Contains(descriptors.Descriptors, descriptor =>
             descriptor.CapabilityId == CapabilityIds.PowerSustained);
+        CapabilityDescriptor sustained = Assert.Single(descriptors.Descriptors,
+            descriptor => descriptor.CapabilityId == CapabilityIds.PowerSustained);
+        Assert.True(DevicePowerPreset.TryValidate(descriptors.Descriptors, out string? presetError), presetError);
+        Assert.Equal(new DevicePowerPreset[]
+        {
+            new("super-battery", "Super Battery", 8, 9, DevicePowerMode.BetterBattery),
+            new("balanced", "Balanced", 17, 18, DevicePowerMode.Balanced),
+            new("extreme-performance", "Extreme Performance", 30, 31, DevicePowerMode.BestPerformance),
+        }, sustained.PowerPresets);
         Assert.Contains(descriptors.Descriptors, descriptor =>
             descriptor.CapabilityId == CapabilityIds.ChargeLimit
             && descriptor.Role == CapabilityRole.ChargeLimit
