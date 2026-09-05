@@ -144,3 +144,5 @@ MIT. See `LICENSE`. A plugin links only the MIT SDK, never WSGM, so nothing here
 plugin to any particular licence. Third-party notices are in
 `src/WSGM.Device.Msi.Claw8A2Vm/THIRD_PARTY_NOTICES.md` — the glyph artwork is MIT from
 `handheld-controller-glyphs`, and no Intel code is redistributed.
+
+The package places its controls in the SDK shared Power, RGB and Info sections. WSGM can combine them with its own controls and assign the declared presets separately for AC and battery power.

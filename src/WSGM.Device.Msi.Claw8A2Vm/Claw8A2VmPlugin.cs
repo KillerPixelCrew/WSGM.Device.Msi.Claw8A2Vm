@@ -1630,13 +1630,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
     /// </remarks>
     private static readonly IReadOnlyList<CapabilitySection> OverlaySections =
     [
-        new CapabilitySection
+        DeviceSections.Power with
         {
-            SectionId = SectionIds.Power,
-            Key = SettingSectionKey.Power,
-            Icon = SectionIcon.Power,
-            CustomDescription = "Power limits, charging, fans, and thermals",
-            SortOrder = 0,
             Categories =
             [
                 new CapabilityCategory
@@ -1666,13 +1661,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 },
             ],
         },
-        new CapabilitySection
+        DeviceSections.Rgb with
         {
-            SectionId = SectionIds.Lighting,
-            Key = SettingSectionKey.Lighting,
-            Icon = SectionIcon.Lighting,
-            CustomDescription = "Ring and button lighting",
-            SortOrder = 2,
             Categories =
             [
                 new CapabilityCategory
@@ -1684,14 +1674,8 @@ public sealed class Claw8A2VmPlugin : IDevicePlugin
                 },
             ],
         },
-        new CapabilitySection
+        DeviceSections.Info with
         {
-            SectionId = SectionIds.Info,
-            Key = SettingSectionKey.Custom,
-            CustomTitle = "Info",
-            Icon = SectionIcon.Gauge,
-            CustomDescription = "What the plugin holds, and what the device reports",
-            SortOrder = 5,
             Categories =
             [
                 new CapabilityCategory

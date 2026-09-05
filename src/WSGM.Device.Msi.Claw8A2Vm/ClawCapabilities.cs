@@ -1057,8 +1057,8 @@ internal static class CapabilityInstances
 /// <summary>Overlay sections this plugin declares in its descriptor set.</summary>
 internal static class SectionIds
 {
-    public const string Power = "power";
-    public const string Lighting = "lighting";
+    public const string Power = DeviceSections.PowerId;
+    public const string Lighting = DeviceSections.RgbId;
 
     /// <summary>Read-only ownership and telemetry. Nothing here is a control.</summary>
     /// <remarks>
@@ -1067,7 +1067,7 @@ internal static class SectionIds
     /// nothing the rest of the time, so it is no longer a Controller page competing with the one
     /// that has the actual controller settings on it.
     /// </remarks>
-    public const string Info = "info";
+    public const string Info = DeviceSections.InfoId;
 }
 
 /// <summary>Categories inside the declared overlay sections.</summary>
